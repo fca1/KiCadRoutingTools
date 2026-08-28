@@ -15,6 +15,7 @@ from kicad_track_gloss.engine import (combine_plans, find_track_terminal_vertice
                                       generate_converged_plan,
                                       generate_single_connection_alternatives,
                                       generate_single_connection_salvage_plans,
+                                      interpolate_plan_backoffs,
                                       rank_candidate_plans,
                                       smooth_selected_chains,
                                       split_plan_components, summarize_plan)
@@ -27,6 +28,7 @@ from kicad_track_gloss.kicad.native_salvage import (
 from kicad_track_gloss.engine.planner import (
     PlanningDeadlineExceeded, _apply_to_model,
     _group_dependency_signature)
+from kicad_track_gloss.engine.taut_string import pull_taut
 
 
 def test_expired_planning_deadline_stops_before_candidate_search():
@@ -35,6 +37,59 @@ def test_expired_planning_deadline_stops_before_candidate_search():
     with pytest.raises(PlanningDeadlineExceeded):
         smooth_selected_chains(
             model, eligible, deadline=time.monotonic() - 1.0)
+
+
+def test_taut_string_repeats_contact_moves_until_the_geometric_fixed_point():
+    initial = ((0.0, 0.0), (2.0, 2.0), (2.0, 6.0), (6.0, 6.0))
+
+    def contact_moves(path):
+        vertical_x = path[1][0]
+        if vertical_x >= 4.0:
+            return ()
+        next_x = min(4.0, vertical_x + 1.0)
+        return (((0.0, 0.0), (next_x, next_x),
+                 (next_x, 6.0), (6.0, 6.0)),)
+
+    # Reject chords so this test isolates repeated obstacle-contact movement.
+    states = pull_taut(
+        initial, is_safe=lambda path: len(path) == 4,
+        contact_moves=contact_moves, coordinate_quantum=0.001,
+        check_deadline=lambda: None)
+
+    assert len(states) == 2
+    assert states[-1][1] == (4.0, 4.0)
+    assert states[-1][2] == (4.0, 6.0)
+
+
+def test_native_backoff_adds_only_required_length_toward_taut_geometry():
+    segments = [
+        Segment(0, 0, 2, 2, 0.2, 0, 1, "a"),
+        Segment(2, 2, 2, 6, 0.2, 0, 1, "b"),
+        Segment(2, 6, 6, 6, 0.2, 0, 1, "c"),
+    ]
+    model = BoardModel(segments, coordinate_quantum_mm=0.001)
+    safe = GlossResult(
+        remove_keys=["a", "b", "c"], additions=[
+            AddedSegment((0, 0), (3, 3), 0.2, 0, 1),
+            AddedSegment((3, 3), (3, 6), 0.2, 0, 1),
+            AddedSegment((3, 6), (6, 6), 0.2, 0, 1),
+        ], saved_mm=(2 * math.sqrt(2) + 8) -
+        (3 * math.sqrt(2) + 6), fixed_point=False)
+    taut = GlossResult(
+        remove_keys=["a", "b", "c"], additions=[
+            AddedSegment((0, 0), (4, 4), 0.2, 0, 1),
+            AddedSegment((4, 4), (4, 6), 0.2, 0, 1),
+            AddedSegment((4, 6), (6, 6), 0.2, 0, 1),
+        ], saved_mm=(2 * math.sqrt(2) + 8) -
+        (4 * math.sqrt(2) + 4), fixed_point=True)
+
+    backoffs = interpolate_plan_backoffs(
+        model, {"a", "b", "c"}, safe, taut)
+
+    assert len(backoffs) == 3
+    assert backoffs[0].saved_mm > backoffs[-1].saved_mm > safe.saved_mm
+    assert backoffs[0].additions[0].end == (3.875, 3.875)
+    assert all(not plan.fixed_point for plan in backoffs)
 
 
 def test_disjoint_local_connection_plans_compose_monotonically():
@@ -177,6 +232,38 @@ def test_native_candidate_search_continues_past_first_process_wave():
         ("candidate3",),
     ]
     assert decision.plan is candidates[3]
+    assert decision.native.allowed
+
+
+def test_native_fallback_fixed_point_is_resumed_in_complete_connection_domain():
+    primary = _candidate("primary", 10.0)
+    fallback = _candidate("fallback", 8.0)
+    continued = _candidate("continued", 12.0)
+    continuation_calls = []
+
+    class Adapter:
+        def validate_plan_ladder(self, _board, plans, **_kwargs):
+            assert plans == [primary, fallback]
+            return [_native_result(False), _native_result(True)]
+
+        def validate_plan(self, _board, plan, **_kwargs):
+            assert plan is continued
+            return _native_result(True)
+
+    def continuations(plan):
+        continuation_calls.append(plan)
+        return [continued] if plan is fallback else []
+
+    decision = maximize_safe_native_candidates(
+        Adapter(), object(), BoardModel([]), set(), [primary, fallback],
+        conservative_plan=fallback, connection_plans=[],
+        force_native=False, skip_native=False,
+        operation_deadline=time.monotonic() + 5.0,
+        wait_callback=None, continuation_factory=continuations)
+
+    assert continuation_calls == [fallback]
+    assert decision.plan is continued
+    assert decision.plan.fixed_point
     assert decision.native.allowed
 
 
@@ -1067,6 +1154,7 @@ def test_pcm_archive_uses_flat_entrypoint_with_internal_packages():
     assert "plugins/internal_config.json" in names
     assert "plugins/engine/planner.py" in names
     assert "plugins/engine/local_operators.py" in names
+    assert "plugins/engine/taut_string.py" in names
     assert "plugins/engine/context.py" in names
     assert "plugins/engine/parallel.py" in names
     assert "plugins/engine/pads.py" in names

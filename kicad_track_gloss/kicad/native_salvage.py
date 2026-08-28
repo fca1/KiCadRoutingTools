@@ -5,7 +5,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from ..engine.workflow import (combine_plans, plan_identity,
+from ..engine.workflow import (combine_plans, interpolate_plan_backoffs,
+                               plan_identity,
                                rank_candidate_plans)
 
 
@@ -99,7 +100,8 @@ def _plans_near_findings(model, plans, points):
 def maximize_safe_native_candidates(
         adapter, board, model, eligible_keys, planning_candidates, *,
         conservative_plan, connection_plans, force_native, skip_native,
-        operation_deadline, wait_callback):
+        operation_deadline, wait_callback, connection_plan_factory=None,
+        continuation_factory=None):
     """Validate diverse candidates while never losing an approved incumbent.
 
     Pure geometric rank cannot predict native DRC validity.  The first wave
@@ -272,6 +274,132 @@ def maximize_safe_native_candidates(
                     decision.native = terminal_error
                 break
 
+    # Replanning every intra-connection region is useful only after native
+    # authority rejects the broad optimum. Keep accepted one-connection work
+    # fast by expanding those units lazily, while the operation deadline still
+    # bounds the deeper search.
+    if (connection_plan_factory is not None and
+            not decision.primary_native.allowed and
+            (operation_deadline is None or
+             time.monotonic() < operation_deadline)):
+        connection_plans = list(rank_candidate_plans(
+            tuple(connection_plans) + tuple(connection_plan_factory())))
+
+    canonically_probed = set()
+
+    def continue_incumbent():
+        """Resume the complete connection after any native-approved fallback."""
+        if (continuation_factory is None or decision.plan is None or
+                decision.native is None or not decision.native.allowed):
+            return
+        identity = plan_identity(decision.plan)
+        if identity in canonically_probed:
+            return
+        continuation_required = (
+            not decision.plan.fixed_point or
+            identity != plan_identity(primary))
+        if not continuation_required:
+            canonically_probed.add(identity)
+            return
+        while (continuation_required and
+               (operation_deadline is None or
+                time.monotonic() < operation_deadline)):
+            continuations = list(continuation_factory(decision.plan))
+            if not continuations:
+                decision.plan.fixed_point = True
+                canonically_probed.add(plan_identity(decision.plan))
+                return
+            accepted = None
+            terminal_error = False
+            rejected_taut = None
+            for offset in range(0, len(continuations), 3):
+                if (operation_deadline is not None and
+                        time.monotonic() >= operation_deadline):
+                    break
+                remaining = (None if operation_deadline is None else
+                             max(0.0, operation_deadline - time.monotonic()))
+                wave = continuations[offset:offset + 3]
+                stage_started = time.monotonic()
+                if len(wave) > 1:
+                    native_results = adapter.validate_plan_ladder(
+                        board, wave, force_native=force_native,
+                        skip_native=skip_native, timeout_seconds=remaining,
+                        wait_callback=wait_callback)
+                else:
+                    native_results = [adapter.validate_plan(
+                        board, wave[0], force_native=force_native,
+                        skip_native=skip_native, timeout_seconds=remaining,
+                        wait_callback=wait_callback)]
+                decision.followup_validation_ms += (
+                    time.monotonic() - stage_started) * 1000.0
+                decision.followup_validations += sum(
+                    result.validation_mode != "not_needed"
+                    for result in native_results)
+                accepted = next((
+                    (candidate, native) for candidate, native in
+                    zip(wave, native_results) if native.allowed), None)
+                if accepted is not None:
+                    accepted_index = wave.index(accepted[0])
+                    rejected_taut = next((
+                        candidate for candidate, native in
+                        zip(wave[:accepted_index],
+                            native_results[:accepted_index])
+                        if not native.allowed and not native.error and
+                        native.validation_mode != "native_timeout"), None)
+                terminal_error = any(
+                    native.error or
+                    native.validation_mode == "native_timeout"
+                    for native in native_results)
+                if accepted is not None or terminal_error:
+                    break
+            if accepted is None:
+                decision.plan.fixed_point = False
+                return
+            if (rejected_taut is not None and
+                    (operation_deadline is None or
+                     time.monotonic() < operation_deadline)):
+                backoffs = list(interpolate_plan_backoffs(
+                    model, eligible_keys, accepted[0], rejected_taut))
+                if backoffs:
+                    remaining = (
+                        None if operation_deadline is None else
+                        max(0.0, operation_deadline - time.monotonic()))
+                    stage_started = time.monotonic()
+                    if len(backoffs) > 1:
+                        backoff_results = adapter.validate_plan_ladder(
+                            board, backoffs, force_native=force_native,
+                            skip_native=skip_native,
+                            timeout_seconds=remaining,
+                            wait_callback=wait_callback)
+                    else:
+                        backoff_results = [adapter.validate_plan(
+                            board, backoffs[0], force_native=force_native,
+                            skip_native=skip_native,
+                            timeout_seconds=remaining,
+                            wait_callback=wait_callback)]
+                    decision.followup_validation_ms += (
+                        time.monotonic() - stage_started) * 1000.0
+                    decision.followup_validations += sum(
+                        result.validation_mode != "not_needed"
+                        for result in backoff_results)
+                    refined = next((
+                        (candidate, native) for candidate, native in
+                        zip(backoffs, backoff_results) if native.allowed),
+                        None)
+                    if refined is not None:
+                        accepted = refined
+            decision.plan, decision.native = accepted
+            continuation_required = not decision.plan.fixed_point
+        if continuation_required:
+            decision.plan.fixed_point = False
+        else:
+            canonically_probed.add(plan_identity(decision.plan))
+
+    # For a single connection, finishing the physical contraction is more
+    # important than exploring unrelated fallback subsets.  Spend the first
+    # remaining DRC opportunity on the approved incumbent itself.
+    continue_incumbent()
+
     # A rejected full local composition is only an upper bound.  Its safe
     # subsets may still beat the incumbent, so use the remaining budget while
     # retaining the approved plan as a floor.
@@ -304,6 +432,7 @@ def maximize_safe_native_candidates(
             decision.salvage_used = True
             decision.connections_retained = retained
             decision.connections_planned = total
+            continue_incumbent()
 
     # Broad composed alternatives come last: local salvage is anytime and can
     # grow a proven incumbent, whereas one rejected monolithic follow-up can
@@ -331,6 +460,7 @@ def maximize_safe_native_candidates(
             if native.allowed and _is_better_plan(candidate, decision.plan):
                 decision.plan = candidate
                 decision.native = native
+                continue_incumbent()
             if native.error or native.validation_mode == "native_timeout":
                 if decision.native is None:
                     decision.native = native
@@ -338,6 +468,8 @@ def maximize_safe_native_candidates(
 
     if decision.native is None:
         decision.native = last_native
+
+    continue_incumbent()
     decision.fallback_used = (
         decision.plan is not None and not decision.salvage_used and
         plan_identity(decision.plan) != plan_identity(primary))

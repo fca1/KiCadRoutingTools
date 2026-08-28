@@ -15,6 +15,7 @@ from .configuration import get_session_config
 from .engine import (find_pad_terminal_targets, find_track_terminal_vertices,
                      compose_compatible_connection_plans,
                      generate_connection_candidates, generate_converged_plan,
+                     generate_plan_continuations,
                      generate_single_connection_alternatives,
                      generate_single_connection_salvage_plans,
                      plan_identity, plan_net_ids, rank_candidate_plans,
@@ -367,7 +368,8 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                     collect_statistics=diagnostic,
                     planning_deadline=planning_deadline,
                     cancellation_grace_seconds=(
-                        config.timing.interactive_cancellation_grace_seconds)),
+                        config.timing.interactive_cancellation_grace_seconds),
+                    replan=False),
                 wait_callback)
             planning_candidates.extend(local_candidates)
             single_connection_units = _run_api_neutral(
@@ -417,9 +419,15 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                     "the current board was left unchanged.")
             else:
                 report.append("Result: no safe improvement found.")
-                report.append(
-                    "Possible reasons: disconnected selection, fixed junction, locked/tuned "
-                    "track, insufficient length gain, clearance, pad, via, keepout, or board edge.")
+                reasons = [warning for warning in best.warnings
+                           if "time budget" not in warning.lower()]
+                if reasons:
+                    report.extend("Planning reason: " + reason
+                                  for reason in reasons)
+                else:
+                    report.append(
+                        "Planning reason: no improving candidate passed the "
+                        "engine's exact geometry and connectivity gates.")
             return False
         stage_started = time.monotonic()
         drc_budget = operation_deadline - time.monotonic()
@@ -435,13 +443,44 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             plan for plan in rank_candidate_plans(conservative_ladder)
             if plan.changed and
             plan_identity(plan) != plan_identity(global_plan)), None)
+        decision_continuation = None
+        if len(snapshot.connection_scopes) == 1:
+            decision_continuation = lambda base: _run_api_neutral(
+                lambda: generate_plan_continuations(
+                    snapshot.model, snapshot.eligible_keys, base,
+                    min_gain=config.gloss.minimum_saved_length_mm,
+                    clearance=snapshot.minimum_clearance,
+                    group_max_passes=(
+                        config.convergence.interactive_group_max_passes),
+                    collect_statistics=diagnostic,
+                    planning_deadline=operation_deadline,
+                    cancellation_grace_seconds=(
+                        config.timing.interactive_cancellation_grace_seconds)),
+                wait_callback)
         decision = _maximize_safe_native_candidates(
             adapter, board, snapshot.model, snapshot.eligible_keys,
             planning_candidates, conservative_plan=conservative,
             connection_plans=connection_plans,
             force_native=force_native, skip_native=skip_native,
             operation_deadline=operation_deadline,
-            wait_callback=wait_callback)
+            wait_callback=wait_callback,
+            connection_plan_factory=(
+                (lambda: _run_api_neutral(
+                    lambda: generate_single_connection_salvage_plans(
+                        snapshot.model, snapshot.eligible_keys,
+                        planning_candidates,
+                        min_gain=config.gloss.minimum_saved_length_mm,
+                        clearance=snapshot.minimum_clearance,
+                        group_max_passes=(
+                            config.convergence.interactive_group_max_passes),
+                        collect_statistics=diagnostic,
+                        planning_deadline=planning_deadline,
+                        cancellation_grace_seconds=(
+                            config.timing.interactive_cancellation_grace_seconds),
+                        replan=True),
+                    wait_callback))
+                if len(snapshot.connection_scopes) == 1 else None),
+            continuation_factory=decision_continuation)
         best = decision.plan or best
         native = decision.native
         fallback_used = decision.fallback_used

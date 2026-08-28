@@ -27,12 +27,14 @@ from .candidate_geometry import (
     retain_identity_replacements as _retain_identity_replacements,
     segment_order_key as _segment_order_key)
 from .context import PlannerContext, line_bbox
-from .geometry import length, octolinear_paths, point_segment_distance
+from .geometry import (length, octolinear_paths, point_segment_distance,
+                       quantize_path)
 from .local_operators import (internal_segment_translation_paths,
                               maximal_corner_chamfer_path)
 from .model import AddedSegment, GlossResult, Segment, Transformation, segment_key
 from .pads import pad_contains, segment_hits_pad
 from .statistics import classify_transformation
+from .taut_string import pull_taut
 from .terminals import (find_pad_terminal_targets, find_track_terminal_targets,
                         movable_endpoint_pairs, vertex)
 from .validation import validate_result
@@ -182,6 +184,66 @@ def _path_additions(path, originals, layer, net_id):
                     runs[run_index][0][1]))
         travelled += edge_length
     return additions
+
+
+def _taut_chain_paths(model, points, chain, layer, net_id, *, context,
+                      clearance, immutable_cover_keys, deadline,
+                      cancel_check):
+    """Pull one routed chain to its fixed-endpoint geometric point state."""
+    replaced = frozenset(segment_key(segment) for segment in chain)
+    tolerance = model.coordinate_quantum_mm
+    uniform = len({(round(segment.width, 6),
+                    round(segment.clearance, 6))
+                   for segment in chain}) == 1
+
+    def check():
+        _check_deadline(deadline, cancel_check)
+
+    def is_safe(path):
+        additions = _path_additions(path, chain, layer, net_id)
+        if not additions:
+            return False
+        for addition in additions:
+            moving = replace(
+                chain[0], width=addition.width,
+                clearance=addition.clearance)
+            if _path_blocker(
+                    model, (addition.start, addition.end), moving,
+                    replaced, clearance, context, immutable_cover_keys):
+                return False
+        return True
+
+    def contact_moves(path):
+        # Width transitions remain free to slide along a contracted path, but
+        # a continuous support-line displacement is only well-defined while
+        # the three participating runs share one physical width/rule pair.
+        if not uniform:
+            return ()
+        prototype = chain[0]
+        synthetic = [replace(
+            prototype, start_x=a[0], start_y=a[1],
+            end_x=b[0], end_y=b[1], uuid="")
+            for a, b in zip(path, path[1:])]
+        moves = []
+        for index in range(len(synthetic) - 1):
+            local = maximal_corner_chamfer_path(
+                path, index, synthetic[index:index + 2], model, context,
+                clearance, replaced, immutable_cover_keys, _check_deadline,
+                _is_octolinear, deadline, cancel_check)
+            if local is not None:
+                moves.append(path[:index] + tuple(local) + path[index + 3:])
+        for index in range(len(synthetic) - 2):
+            for local in internal_segment_translation_paths(
+                    path, index, synthetic[index:index + 3], model, context,
+                    clearance, replaced, immutable_cover_keys,
+                    _check_deadline, deadline, cancel_check, 0.0):
+                moves.append(
+                    path[:index] + tuple(local) + path[index + 4:])
+        return tuple(moves)
+
+    return pull_taut(
+        tuple(points), is_safe=is_safe, contact_moves=contact_moves,
+        coordinate_quantum=tolerance, check_deadline=check)
 
 
 def _endpoint_moved_into_pad(
@@ -454,9 +516,11 @@ def _merge_final_collinear(model, eligible):
 
 
 def _compose_refined_plan(original_model, original_eligible, final_model,
-                          final_eligible, passes, pruned_stubs):
-    final_model, final_eligible = _merge_final_collinear(
-        final_model, set(final_eligible))
+                          final_eligible, passes, pruned_stubs,
+                          merge_collinear=True):
+    if merge_collinear:
+        final_model, final_eligible = _merge_final_collinear(
+            final_model, set(final_eligible))
     original_keys = {segment_key(segment) for segment in original_model.segments}
     final_keys = {segment_key(segment) for segment in final_model.segments}
     result = GlossResult()
@@ -555,6 +619,7 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                            preserve_routed_corridor=False,
                            allow_track_terminal_sliding=True,
                            allow_pad_terminal_sliding=True,
+                           use_taut_string=True,
                            collect_statistics=True, planner_context=None,
                            deadline=None, cancel_check=None):
     """Return an immutable edit plan; never mutates ``model``.
@@ -647,6 +712,16 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                 cumulative = [0.0]
                 for a, b in zip(points, points[1:]):
                     cumulative.append(cumulative[-1] + length(a, b))
+                # The rubber-band fixed point is the canonical gloss. Ranked
+                # portfolio variants deliberately keep the older local search
+                # domains as independent, cheaper native-DRC fallbacks.
+                taut_paths = (_taut_chain_paths(
+                    model, points, chain, layer, net_id,
+                    context=planner_context, clearance=clearance,
+                    immutable_cover_keys=immutable_cover_keys,
+                    deadline=deadline, cancel_check=cancel_check)
+                    if use_taut_string and int(solution_rank) == 0 else ())
+
                 def choices_at(i):
                     _check_deadline(deadline, cancel_check)
                     choices = []
@@ -693,6 +768,10 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                                     clearance):
                                 if path not in paths:
                                     paths.append(path)
+                        if i == 0 and j == len(chain):
+                            for path in taut_paths:
+                                if path not in paths:
+                                    paths.append(path)
                         if j == i + 2:
                             chamfer = maximal_corner_chamfer_path(
                                 points, i, span, model, planner_context,
@@ -711,6 +790,10 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                                     paths.append(translated)
                         for path in paths:
                             _check_deadline(deadline, cancel_check)
+                            path = quantize_path(
+                                path, model.coordinate_quantum_mm)
+                            if len(path) < 2:
+                                continue
                             if collect_statistics:
                                 _increment(result.search_counts, "paths_evaluated")
                             new_len = sum(length(a, b) for a, b in zip(path, path[1:]))
@@ -1647,7 +1730,7 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
             # simplification after the engine has already claimed A1 fixed.
             merged_model, merged_eligible = _merge_final_collinear(
                 raw_proposed_model, set(raw_proposed_eligible))
-            states = [(merged_model, merged_eligible)]
+            states = [(merged_model, merged_eligible, True)]
             merged_signature = _model_geometry_signature(merged_model)
             current_signature = _model_geometry_signature(current_model)
             if (merged_signature != current_signature and
@@ -1659,8 +1742,9 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
                 # rewrite instead of losing a formerly safe gloss. When the
                 # merge reproduces current copper exactly, however, the raw
                 # state changes segmentation only and would create a cycle.
-                states.append((raw_proposed_model, raw_proposed_eligible))
-            for proposed_model, proposed_eligible in states:
+                states.append((raw_proposed_model, raw_proposed_eligible,
+                               False))
+            for proposed_model, proposed_eligible, merge_composed in states:
                 proposed_model = _canonicalize_model_segments(proposed_model)
                 if (_model_geometry_signature(proposed_model) ==
                         _model_geometry_signature(current_model)):
@@ -1671,14 +1755,16 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
                     composed = _compose_refined_plan(
                         model, original_eligible, proposed_model,
                         proposed_eligible, changed_steps + [step],
-                        pruned_stubs + newly_pruned)
+                        pruned_stubs + newly_pruned,
+                        merge_collinear=merge_composed)
                     source_proposed, source_proposed_eligible = \
                         _restore_unchanged_subdivisions(
                             proposed_model, proposed_eligible, input_expansions)
                     source_composed = _compose_refined_plan(
                         source_model, source_eligible, source_proposed,
                         source_proposed_eligible, changed_steps + [step],
-                        pruned_stubs + newly_pruned)
+                        pruned_stubs + newly_pruned,
+                        merge_collinear=merge_composed)
                 except ValueError as error:
                     rejected_steps.append(str(error))
                     continue
@@ -1688,7 +1774,12 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
             if accepted is not None:
                 break
         if accepted is None:
-            final_search = GlossResult()
+            probe = changed_plans[0]
+            final_search = GlossResult(
+                chains_considered=probe.chains_considered,
+                chains_changed=0,
+                search_counts=dict(probe.search_counts),
+                blocking_nets=dict(probe.blocking_nets))
             final_search.warnings.append(
                 "No cumulatively safe convergence step remained: " +
                 "; ".join(sorted(set(rejected_steps))))

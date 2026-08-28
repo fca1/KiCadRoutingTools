@@ -2,9 +2,11 @@
 
 KiCad Track Gloss is a KiCad 10 ActionPlugin for shortening and simplifying
 existing PCB tracks. Select one or more straight segments and run the action.
-The plugin automatically expands the selected connections, searches for safe
-0/45/90-degree improvements, validates the composed plan, and applies it to the
-current board as one Undo operation.
+The plugin automatically expands the selected connections and treats each
+routed chain as a string pulled taut between its electrical terminations. It
+repeatedly contracts the complete path against inflated copper obstacles,
+reconstructs an exact 0/45/90-degree track, validates the result, and applies
+it to the current board as one Undo operation.
 
 Successful operations are silent and never save the board. Use KiCad Undo to
 reject a result. A valid no-op plays KiCad's standard warning sound once.

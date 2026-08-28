@@ -6,7 +6,7 @@ from dataclasses import replace
 import math
 
 from .candidate_geometry import path_blocker
-from .geometry import length
+from .geometry import length, quantize_path
 
 
 def maximal_corner_chamfer_path(
@@ -49,6 +49,10 @@ def maximal_corner_chamfer_path(
     def blocked(distance):
         check_deadline(deadline, cancel_check)
         before, after = cut_points(distance)
+        quantized = quantize_path((before, after), tolerance)
+        if len(quantized) != 2:
+            return True
+        before, after = quantized
         return path_blocker(
             model, (before, after), moving, replaced_keys, clearance,
             context, immutable_cover_keys)
@@ -70,7 +74,7 @@ def maximal_corner_chamfer_path(
     if safe <= tolerance:
         return None
     before, after = cut_points(safe)
-    raw = (a, before, after, c)
+    raw = quantize_path((a, before, after, c), tolerance)
     path = tuple(point for index, point in enumerate(raw)
                  if index == 0 or length(raw[index - 1], point) > tolerance)
     return path if len(path) >= 2 else None
@@ -174,6 +178,7 @@ def internal_segment_translation_paths(
         raw = raw_path(offset)
         if raw is None:
             return None
+        raw = quantize_path(raw, tolerance)
         path = tuple(point for index, point in enumerate(raw)
                      if index == 0 or
                      length(raw[index - 1], point) > tolerance)

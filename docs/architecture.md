@@ -44,7 +44,10 @@ a valid substitute for already discovered safe work.
 - `engine/candidate_geometry.py`: exact local identity, clearance, pad,
   keepout, mask, and edge validation.
 - `engine/local_operators.py`: corridor-preserving corner chamfers and
-  interior-segment translations, independent of convergence orchestration.
+  continuous obstacle-contact moves used by the string contraction.
+- `engine/taut_string.py`: complete fixed-endpoint rubber-band contraction;
+  every safe shortening is reapplied until no support point can move or
+  disappear.
 - `engine/terminals.py`: sliding same-net T termination analysis.
 - `engine/pads.py`: pad copper containment and bounded contact candidates.
 - `engine/planner.py`: chain discovery, octolinear generation, scheduling,
@@ -104,7 +107,14 @@ optimum, and ranks that composition alongside the global converged plan. A
 larger selection therefore cannot silently replace a better local result with
 a lower-quality plan.
 
-Within one connection, converged states are also split at unchanged-copper
+Within one connection, the canonical planner pulls the complete routed path
+taut. Existing vertices preserve the routed homotopy while every safe
+octolinear chord is considered; support runs then slide continuously to their
+last safe obstacle contact. The globally shortest safe contraction is applied
+and the same rule repeats to a quantized geometric fixed point. This is a
+post-route contraction, not a new route search.
+
+Converged states are also split at unchanged-copper
 boundaries into independently applicable optimization units. Each unit is
 replanned from the original board before native validation, so one rejected
 thermal-sensitive rewrite cannot discard another safe translation on the same
@@ -115,6 +125,13 @@ validate the complete remaining batch and complementary partial extensions.
 Every accepted extension
 immediately becomes the retained result, so expiration returns useful work
 without treating a complete net as the smallest recoverable unit.
+
+When KiCad rejects the taut geometry but approves a less aggressive state
+with the same topology, the engine interpolates exact octolinear backoff
+states. Native DRC selects the closest safe state, implementing the second
+half of the physical model: add only the length required by KiCad authority.
+A fixed point reached in a restricted fallback domain is never reported as
+the fixed point of the complete connection.
 
 ## KiCad API boundary
 

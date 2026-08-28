@@ -323,6 +323,7 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
      version, config) = _bootstrap_engine()
     from kicad_track_gloss.engine import (
         compose_compatible_connection_plans, generate_connection_candidates,
+        generate_plan_continuations,
         generate_single_connection_alternatives,
         generate_single_connection_salvage_plans, plan_identity,
         rank_candidate_plans)
@@ -454,7 +455,8 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
                     collect_statistics=False,
                     planning_deadline=planning_deadline,
                     cancellation_grace_seconds=(
-                        config.timing.interactive_cancellation_grace_seconds))
+                        config.timing.interactive_cancellation_grace_seconds),
+                    replan=False)
             connection_plans.extend(single_connection_units)
         planning_candidates = list(rank_candidate_plans(planning_candidates))
         best = planning_candidates[0]
@@ -479,7 +481,30 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
                 connection_plans=connection_plans,
                 force_native=False, skip_native=False,
                 operation_deadline=operation_deadline,
-                wait_callback=None)
+                wait_callback=None,
+                connection_plan_factory=(
+                    (lambda: generate_single_connection_salvage_plans(
+                        initial.model, eligible, planning_candidates,
+                        min_gain=minimum_saved_length_mm,
+                        clearance=initial.minimum_clearance,
+                        group_max_passes=max_passes,
+                        collect_statistics=False,
+                        planning_deadline=planning_deadline,
+                        cancellation_grace_seconds=(
+                            config.timing.interactive_cancellation_grace_seconds),
+                        replan=True))
+                    if len(connection_scopes) == 1 else None),
+                continuation_factory=(
+                    (lambda base: generate_plan_continuations(
+                        initial.model, eligible, base,
+                        min_gain=minimum_saved_length_mm,
+                        clearance=initial.minimum_clearance,
+                        group_max_passes=max_passes,
+                        collect_statistics=False,
+                        planning_deadline=operation_deadline,
+                        cancellation_grace_seconds=(
+                            config.timing.interactive_cancellation_grace_seconds)))
+                    if len(connection_scopes) == 1 else None))
             timings_ms["native_candidate_search"] = (
                 time.monotonic() - stage_started) * 1000.0
             if decision.initial_portfolio:

@@ -12,6 +12,19 @@ def length(a, b):
     return math.hypot(b[0] - a[0], b[1] - a[1])
 
 
+def quantize_path(path, quantum):
+    """Return the exact path representable by the target board runtime."""
+    if quantum <= 0.0:
+        return tuple(path)
+    result = []
+    for x, y in path:
+        point = (round(x / quantum) * quantum,
+                 round(y / quantum) * quantum)
+        if not result or point != result[-1]:
+            result.append(point)
+    return tuple(result)
+
+
 def point_segment_distance(p, a, b):
     dx, dy = b[0] - a[0], b[1] - a[1]
     den = dx * dx + dy * dy
