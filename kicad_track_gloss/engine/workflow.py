@@ -162,52 +162,65 @@ def generate_single_connection_alternatives(
         model, eligible_keys, primary_plan, *, min_gain,
         clearance, group_max_passes,
         collect_statistics, planning_deadline,
-        cancellation_grace_seconds, maximum_candidates=3):
-    """Return fully converged, electrically complementary local glosses.
+        cancellation_grace_seconds):
+    """Return complementary local glosses and exact visited states.
 
     A single selected connection used to expose only the highest-ranked
     geometry to native DRC.  If that geometry moved a sensitive terminal,
     rejection ended the operation even when the same connection admitted a
-    safe segment translation.  Build alternative fixed-point basins by
-    retaining respectively the KiCad track junctions, pad contacts, or both.
-    These are explicit gloss constraints, not route-search heuristics.
+    safe segment translation. Build alternative basins by retaining the KiCad
+    track junctions, pad contacts, or both, and preserve exact intermediate
+    states of corridor convergence. These are explicit gloss domains, not
+    route-search heuristics.
     """
     candidates = []
     seen = set()
 
     def retain(plan):
-        if (not plan.changed or not plan.fixed_point or
-                plan_identity(plan) in seen):
+        if not plan.changed or plan_identity(plan) in seen:
             return
         seen.add(plan_identity(plan))
         candidates.append(plan)
 
     retain(primary_plan)
-    policies = [
-        # First explore genuinely different interior schedules with the same
-        # electrical freedom as the optimum.  Terminal constraints follow as
-        # complementary fallbacks when those schedules collapse to duplicates.
-        (1, True, True),
-        (2, True, True),
-    ]
     has_track_terminals = bool(find_track_terminal_targets(
         model, set(eligible_keys)))
     has_pad_terminals = bool(find_pad_terminal_targets(
         model, set(eligible_keys)))
+    policies = [
+        # Interior translations and corner cuts form a complete,
+        # corridor-preserving domain.  Keep both its optimum and its next
+        # qualifying state independently of endpoint policy.
+        (0, False, False, True),
+        (1, False, False, True),
+    ]
+    # Electrical endpoint policies precede alternate schedules.  They are
+    # distinct optimization domains, not guesses about which geometry KiCad
+    # DRC might prefer.  Enumerate every applicable domain and let the shared
+    # ranker/native authority decide.
     if has_track_terminals:
-        policies.append((0, False, True))
+        policies.append((0, False, True, False))
     if has_pad_terminals:
-        policies.append((0, True, False))
+        policies.append((0, True, False, False))
     if has_track_terminals or has_pad_terminals:
-        policies.append((0, False, False))
+        policies.append((0, False, False, False))
+    policies.extend(((1, True, True, False), (2, True, True, False)))
+    if has_track_terminals:
+        policies.extend(((1, False, True, False),
+                         (2, False, True, False)))
+    if has_pad_terminals:
+        policies.extend(((1, True, False, False),
+                         (2, True, False, False)))
+    if has_track_terminals or has_pad_terminals:
+        policies.extend(((1, False, False, False),
+                         (2, False, False, False)))
     for (opening_solution_rank, allow_track_sliding,
-         allow_pad_sliding) in policies:
-        if len(candidates) >= maximum_candidates:
-            break
+         allow_pad_sliding, preserve_routed_corridor) in policies:
         if (planning_deadline is not None and
                 time.monotonic() >= planning_deadline):
             break
         try:
+            visited = [] if preserve_routed_corridor else None
             plan = generate_converged_plan(
                 model, eligible_keys, max_passes=None,
                 return_partial_on_limit=True,
@@ -218,12 +231,16 @@ def generate_single_connection_alternatives(
                 collect_statistics=collect_statistics,
                 parallel=False, deadline=planning_deadline,
                 cancellation_grace_seconds=cancellation_grace_seconds,
+                conservative_ladder=visited,
                 opening_solution_rank=opening_solution_rank,
+                preserve_routed_corridor=preserve_routed_corridor,
                 allow_track_terminal_sliding=allow_track_sliding,
                 allow_pad_terminal_sliding=allow_pad_sliding)
         except ValueError:
             continue
         retain(plan)
+        for visited_plan in visited or ():
+            retain(visited_plan)
     return rank_candidate_plans(candidates)
 
 

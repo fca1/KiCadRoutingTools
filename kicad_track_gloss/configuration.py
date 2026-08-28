@@ -24,7 +24,7 @@ class ConvergencePolicy:
 
 @dataclass(frozen=True)
 class SafetyPolicy:
-    kicad_drc_for_single_track: bool
+    use_kicad_native_drc: bool
 
 
 @dataclass(frozen=True)
@@ -76,7 +76,7 @@ def load_internal_config(path=CONFIG_PATH):
         timing = document["timing"]
         safety = document["safety"]
         minimum = gloss["minimum_saved_length_mm"]
-        single_track_drc = safety["kicad_drc_for_single_track"]
+        use_native_drc = safety["use_kicad_native_drc"]
     except (KeyError, TypeError) as error:
         raise ValueError(
             "missing Track Gloss internal configuration field: {}".format(error))
@@ -84,9 +84,8 @@ def load_internal_config(path=CONFIG_PATH):
             not math.isfinite(minimum) or minimum < 0.0):
         raise ValueError(
             "gloss.minimum_saved_length_mm must be a finite non-negative number")
-    if not isinstance(single_track_drc, bool):
-        raise ValueError(
-            "safety.kicad_drc_for_single_track must be a boolean")
+    if not isinstance(use_native_drc, bool):
+        raise ValueError("safety.use_kicad_native_drc must be a boolean")
     total_budget = _positive_number(
         timing.get("interactive_total_time_budget_seconds"),
         "timing.interactive_total_time_budget_seconds")
@@ -118,7 +117,7 @@ def load_internal_config(path=CONFIG_PATH):
                 "timing.interactive_cancellation_grace_seconds",
                 allow_zero=True),
             cli_budget),
-        safety=SafetyPolicy(single_track_drc))
+        safety=SafetyPolicy(use_native_drc))
 
 
 CONFIG = load_internal_config()
@@ -135,7 +134,7 @@ def update_session_config(*, minimum_saved_length_mm,
                           interactive_total_time_budget_seconds,
                           interactive_planning_time_budget_seconds,
                           interactive_cancellation_grace_seconds,
-                          kicad_drc_for_single_track):
+                          use_kicad_native_drc):
     """Validate and install process-local values; never writes the JSON file."""
     global _SESSION_CONFIG
     minimum = _positive_number(
@@ -153,8 +152,8 @@ def update_session_config(*, minimum_saved_length_mm,
     if planning_budget > total_budget:
         raise ValueError(
             "interactive planning time budget cannot exceed total time budget")
-    if not isinstance(kicad_drc_for_single_track, bool):
-        raise ValueError("single-track KiCad DRC must be a boolean")
+    if not isinstance(use_kicad_native_drc, bool):
+        raise ValueError("KiCad native DRC must be a boolean")
     current = _SESSION_CONFIG
     _SESSION_CONFIG = replace(
         current,
@@ -170,7 +169,7 @@ def update_session_config(*, minimum_saved_length_mm,
             interactive_cancellation_grace_seconds=cancellation_grace),
         safety=replace(
             current.safety,
-            kicad_drc_for_single_track=kicad_drc_for_single_track))
+            use_kicad_native_drc=use_kicad_native_drc))
     return _SESSION_CONFIG
 
 

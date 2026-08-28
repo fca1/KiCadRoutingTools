@@ -389,7 +389,7 @@ def validate_native_plan_ladder(adapter, board, plans, *, force_native=False,
         elapsed = (time.monotonic() - started) * 1000.0
         return [NativeDrcResult(
             True, timings_ms={"total": elapsed},
-            validation_mode="single_track_drc_disabled") for _plan in plans]
+            validation_mode="native_drc_disabled") for _plan in plans]
 
     results = [None] * len(plans)
     native_indexes = []

@@ -15,7 +15,7 @@ in-memory session override and never writes the file.
 | `timing.interactive_planning_time_budget_seconds` | `10.0` | seconds > 0 | Plugin, session-editable | Bounds candidate planning before native DRC. It cannot exceed the total budget. |
 | `timing.interactive_cancellation_grace_seconds` | `1.0` | seconds >= 0 | Plugin and worker cancellation | Time allowed for cooperative planner/worker shutdown. |
 | `timing.cli_total_time_budget_seconds` | `null` | seconds > 0 or `null` | CLI | `null` means unlimited offline evaluation; overridden by `--time-budget`. |
-| `safety.kicad_drc_for_single_track` | `true` | boolean | Plugin, session-editable | Enables native before/after KiCad DRC for a one-connection selection. Disabling it improves latency but removes this gate. |
+| `safety.use_kicad_native_drc` | `true` | boolean | Plugin, session-editable | Enables native before/after KiCad DRC for both one-connection and multi-net selections. Disabling it improves latency but removes this gate. |
 
 The JSON has a required integer `schema_version`. Unknown keys, missing keys,
 invalid booleans, non-finite numbers, or incoherent time budgets must fail
@@ -26,7 +26,7 @@ loudly rather than silently changing safety policy.
 The session dialog intentionally exposes only controls that are meaningful
 during interactive work:
 
-1. native KiCad DRC for a one-track selection;
+1. native KiCad DRC for every selection scope;
 2. minimum saved length;
 3. total interactive time budget;
 4. planning time budget;
@@ -51,6 +51,6 @@ not optimization quality parameters.
 
 Increasing budgets or pass limits permits a broader search but does not relax
 clearance, connectivity, keepout, pad, via, layer, width, or Edge.Cuts rules.
-The single-track DRC switch is different: disabling it deliberately removes
-the native validation layer for that interactive case, leaving the internal
+The native DRC switch is different: disabling it deliberately removes
+the native validation layer for the interactive operation, leaving the internal
 geometric and connectivity validation active.

@@ -48,9 +48,9 @@ saved length to be identical:
 D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --segment-subdivisions
 ```
 
-This check is disabled during routine release validation, just like the seven
-input-order replay, because it performs two additional all-board fixed-point
-searches.
+This check is disabled during routine release validation because it performs
+two additional all-board fixed-point searches. The former seven-order replay
+has been removed from the test suite.
 
 Smoke-test the all-track read-only score CLI with the frozen board, project,
 and design rules:

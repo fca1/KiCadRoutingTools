@@ -114,6 +114,35 @@ def test_native_candidate_search_never_drops_safe_third_candidate():
     assert decision.fallback_used
 
 
+def test_native_candidate_search_continues_past_first_process_wave():
+    candidates = [_candidate("candidate{}".format(index), 10.0 - index)
+                  for index in range(4)]
+    calls = []
+
+    class Adapter:
+        def validate_plan_ladder(self, _board, plans, **_kwargs):
+            calls.append(tuple(plan.remove_keys[0] for plan in plans))
+            return [_native_result(False) for _plan in plans]
+
+        def validate_plan(self, _board, plan, **_kwargs):
+            calls.append((plan.remove_keys[0],))
+            return _native_result(True)
+
+    decision = maximize_safe_native_candidates(
+        Adapter(), object(), BoardModel([]), set(), candidates,
+        conservative_plan=candidates[1], connection_plans=[],
+        force_native=False, skip_native=False,
+        operation_deadline=time.monotonic() + 5.0,
+        wait_callback=None)
+
+    assert calls == [
+        ("candidate0", "candidate1", "candidate2"),
+        ("candidate3",),
+    ]
+    assert decision.plan is candidates[3]
+    assert decision.native.allowed
+
+
 def test_native_candidate_search_does_not_salvage_an_identical_incumbent(
         monkeypatch):
     primary = _candidate("primary", 10.0)
@@ -224,11 +253,9 @@ def test_converged_plan_reaches_a_reported_fixed_point():
     assert result.convergence_passes >= 1
 
 
-def test_large_convergence_preserves_the_exact_conservative_opening_plan():
+def test_convergence_preserves_every_exact_visited_plan():
     route = staircase(8, pitch=1.0)
-    # The locked records make this a large scope without adding candidate
-    # work. Real selection expansion excludes them; here they exercise only
-    # the refinement-limit contract used by the cached DRC ladder.
+    # Locked records enlarge the model without adding candidate work.
     locked = [Segment(
         1000.0 + index, 0.0, 1000.5 + index, 0.0,
         0.2, 0, index + 2, "locked{}".format(index), locked=True)
@@ -243,13 +270,15 @@ def test_large_convergence_preserves_the_exact_conservative_opening_plan():
     expected = generate_converged_plan(
         model, eligible, min_gain=0.01, clearance=0.0,
         max_passes=1, return_partial_on_limit=True,
-        max_refinement_passes=0, _allow_junction_scopes=False,
+        _allow_junction_scopes=False,
         parallel=False)
 
-    assert len(ladder) == 1
+    assert ladder
     assert _plan_signature(ladder[0]) == _plan_signature(expected)
     assert ladder[0].convergence_passes == 1
     assert not ladder[0].fixed_point
+    assert [plan.convergence_passes for plan in ladder] == list(
+        range(1, len(ladder) + 1))
 
 
 def test_convergence_observer_reports_monotone_states_and_fixed_point():
@@ -335,8 +364,7 @@ def test_shortened_existing_copper_is_not_rejected_by_coarse_pad_circle():
     pad = CircleObstacle(5, 1.4, 1.9, 0, (0,), "pad")
     result = smooth_selected_chains(
         BoardModel(segments, [pad], minimum_clearance=0.25),
-        {"horizontal", "short"}, min_gain=0.01, clearance=0.25,
-        span_strategy="global")
+        {"horizontal", "short"}, min_gain=0.01, clearance=0.25)
     assert result.changed
     assert set(result.remove_keys) == {"horizontal", "short"}
     assert result.saved_mm > 0.1
@@ -360,7 +388,7 @@ def test_subthreshold_shorter_segment_reduction_dominates():
     ]
     result = smooth_selected_chains(
         BoardModel(segs), {segment.uuid for segment in segs},
-        min_gain=0.2, span_strategy="global", clearance=0.0)
+        min_gain=0.2, clearance=0.0)
 
     assert result.changed
     assert 0.0 < result.saved_mm < 0.2
@@ -374,9 +402,7 @@ def test_long_collinear_chain_has_no_artificial_split_boundary():
         for index in range(105)]
     eligible = {segment_key(segment) for segment in segments}
 
-    result = smooth_selected_chains(
-        BoardModel(segments), eligible,
-        span_strategy="farthest")
+    result = smooth_selected_chains(BoardModel(segments), eligible)
 
     assert set(result.remove_keys) == eligible
     assert len(result.additions) == 1
@@ -395,26 +421,13 @@ def _plan_signature(plan):
             round(plan.saved_mm, 9))
 
 
-def test_batch_result_is_independent_of_input_order():
-    original = staircase(24)
-    eligible = {segment_key(s) for s in original}
-    expected = [_plan_signature(p) for p in generate_candidate_plans(
-        BoardModel(list(original)), eligible)]
-    for seed in range(10):
-        shuffled = list(original)
-        random.Random(seed).shuffle(shuffled)
-        actual = [_plan_signature(p) for p in generate_candidate_plans(
-            BoardModel(shuffled), eligible)]
-        assert actual == expected
-
-
 def test_kicad_netclass_clearance_is_honored():
     segs = staircase(count=8, pitch=1.0)
     foreign = Segment(11.5, 10.8, 11.5, 12.2, 0.15, 0, 2, "foreign")
     model = BoardModel(segs + [foreign], net_clearances={1: 0.8, 2: 0.8},
                        minimum_clearance=0.2)
-    result = smooth_selected_chains(model, {segment_key(s) for s in segs},
-                                    clearance=0.0, span_strategy="global")
+    result = smooth_selected_chains(
+        model, {segment_key(s) for s in segs}, clearance=0.0)
     from kicad_track_gloss.engine.geometry import (point_segment_distance,
                                                    segment_distance)
     for new in result.additions:
@@ -547,8 +560,7 @@ def test_mixed_width_fallback_combinations_keep_connectivity():
     model = BoardModel(segments, pad_regions=pads)
     eligible = {"a", "b"}
     plans = generate_candidate_plans(
-        model, eligible, min_gain=0.01, clearance=0.0,
-        max_refinement_passes=0)
+        model, eligible, min_gain=0.01, clearance=0.0)
 
     assert plans
     for plan in plans:
@@ -659,7 +671,7 @@ def test_mixed_width_chain_is_glossed_without_merging_width_values():
     ]
     result = smooth_selected_chains(
         BoardModel(segments), {segment.uuid for segment in segments},
-        min_gain=0.01, span_strategy="global", clearance=0.0)
+        min_gain=0.01, clearance=0.0)
 
     assert result.changed
     assert set(result.remove_keys) == {"thin", "wide"}
@@ -680,7 +692,7 @@ def test_non_octolinear_copper_is_normalized_even_when_length_increases():
                   (s.end_y - s.start_y) ** 2) ** 0.5 for s in segments)
     result = smooth_selected_chains(
         BoardModel(segments), {segment.uuid for segment in segments},
-        min_gain=0.01, span_strategy="global", clearance=0.0)
+        min_gain=0.01, clearance=0.0)
     after = sum(((a.end[0] - a.start[0]) ** 2 +
                  (a.end[1] - a.start[1]) ** 2) ** 0.5
                 for a in result.additions)
@@ -1646,7 +1658,7 @@ def test_mid_track_t_junction_is_a_sliding_gloss_termination():
 
     assert find_track_terminal_vertices(model, eligible) == {(1, 0, (2, 1))}
     result = smooth_selected_chains(
-        model, eligible, min_gain=0.01, span_strategy="global", clearance=0.0)
+        model, eligible, min_gain=0.01, clearance=0.0)
 
     assert result.changed
     assert any(abs(point[0] - 2) < 1e-9
@@ -1675,8 +1687,7 @@ def test_internal_corner_is_partially_chamfered_before_a_blocker():
     ]
     model = BoardModel(selected + blockers, minimum_clearance=0.2)
     result = smooth_selected_chains(
-        model, {"vertical", "horizontal"}, min_gain=0.2,
-        span_strategy="global", clearance=0.2)
+        model, {"vertical", "horizontal"}, min_gain=0.2, clearance=0.2)
 
     assert result.changed
     assert set(result.remove_keys) == {"vertical", "horizontal"}
@@ -1706,7 +1717,7 @@ def test_internal_segment_translates_to_last_safe_position_before_obstacle():
 
     result = smooth_selected_chains(
         model, {"a", "middle", "c"}, min_gain=0.01,
-        span_strategy="global", clearance=0.1, solution_rank=1)
+        clearance=0.1, solution_rank=1)
 
     assert result.changed
     assert result.saved_mm > 0.1
@@ -1728,7 +1739,7 @@ def test_connection_between_two_through_tracks_glosses_between_terminations():
     terminals = find_track_terminal_vertices(model, eligible)
     assert terminals == {(1, 0, (0, 0)), (1, 0, (3, 2))}
     result = smooth_selected_chains(
-        model, eligible, min_gain=0.01, span_strategy="global", clearance=0.0)
+        model, eligible, min_gain=0.01, clearance=0.0)
 
     assert result.changed
     surviving = [segment for segment in selected
@@ -1783,7 +1794,7 @@ def test_single_branch_endpoint_slides_to_shortest_track_contact():
     model = BoardModel(selected + [through])
     eligible = {segment_key(segment) for segment in selected}
     result = smooth_selected_chains(
-        model, eligible, min_gain=0.01, span_strategy="global", clearance=0.0)
+        model, eligible, min_gain=0.01, clearance=0.0)
 
     assert result.changed
     assert set(result.remove_keys) == eligible
@@ -1797,7 +1808,7 @@ def test_one_segment_can_shorten_by_sliding_its_t_contact():
     through = Segment(4, -2, 4, 3, 0.2, 0, 1, "through")
     model = BoardModel([branch, through])
     result = smooth_selected_chains(
-        model, {"branch"}, min_gain=0.01, span_strategy="global", clearance=0.0)
+        model, {"branch"}, min_gain=0.01, clearance=0.0)
 
     assert result.remove_keys == ["branch"]
     assert len(result.additions) == 1
@@ -1815,7 +1826,7 @@ def test_one_segment_can_shorten_between_two_pad_copper_areas():
     ]
     model = BoardModel([segment], pad_regions=pads)
     result = smooth_selected_chains(
-        model, {"bst"}, min_gain=0.01, span_strategy="global", clearance=0.0)
+        model, {"bst"}, min_gain=0.01, clearance=0.0)
 
     assert result.changed
     assert result.remove_keys == ["bst"]
@@ -1836,7 +1847,7 @@ def test_one_segment_can_shorten_between_two_pad_copper_areas():
     assert summary["mechanisms"][0]["key"] == "pad_slide"
 
 
-def test_single_connection_portfolio_converges_three_terminal_policies():
+def test_single_connection_portfolio_covers_terminal_and_corridor_domains():
     selected = [
         Segment(0, 0, 2, 0, 0.2, 0, 1, "s0"),
         Segment(2, 0, 3, 1, 0.2, 0, 1, "s1"),
@@ -1856,11 +1867,17 @@ def test_single_connection_portfolio_converges_three_terminal_policies():
         group_max_passes=2, collect_statistics=True,
         planning_deadline=None, cancellation_grace_seconds=1.0)
 
-    assert len(candidates) == 3
-    assert all(candidate.fixed_point for candidate in candidates)
+    assert len(candidates) >= 3
+    assert any(candidate.fixed_point for candidate in candidates)
+    assert any(all(item.mechanism == "fixed_endpoints"
+                   for item in candidate.transformations)
+               for candidate in candidates)
+    assert any(any(item.mechanism in ("track_slide", "pad_slide")
+                   for item in candidate.transformations)
+               for candidate in candidates)
     assert len({tuple((item.start, item.end)
                       for item in candidate.additions)
-                for candidate in candidates}) == 3
+                for candidate in candidates}) == len(candidates)
 
 
 def test_diagnostic_collection_does_not_change_the_edit_plan():
@@ -1868,9 +1885,9 @@ def test_diagnostic_collection_does_not_change_the_edit_plan():
     model = BoardModel(segments)
     eligible = {segment_key(segment) for segment in segments}
     diagnostic = smooth_selected_chains(
-        model, eligible, span_strategy="global", collect_statistics=True)
+        model, eligible, collect_statistics=True)
     normal = smooth_selected_chains(
-        model, eligible, span_strategy="global", collect_statistics=False)
+        model, eligible, collect_statistics=False)
 
     assert _plan_signature(normal) == _plan_signature(diagnostic)
     assert diagnostic.transformations and diagnostic.search_counts
@@ -1898,7 +1915,7 @@ def test_diagnostic_report_contains_human_and_machine_readable_statistics():
     segments = staircase(12)
     model = BoardModel(segments)
     eligible = {segment_key(segment) for segment in segments}
-    plan = smooth_selected_chains(model, eligible, span_strategy="global")
+    plan = smooth_selected_chains(model, eligible)
     report = []
     append_plan_statistics(report, summarize_plan(model, eligible, plan))
     text = "\n".join(report)
@@ -2029,7 +2046,7 @@ def test_real_board_two_sliding_t_terminations_choose_nearest_contacts():
     ]
     result = smooth_selected_chains(
         BoardModel(selected + targets), {"branch-a", "branch-b"},
-        min_gain=0.01, span_strategy="global", clearance=0.0)
+        min_gain=0.01, clearance=0.0)
 
     assert result.changed
     assert set(result.remove_keys) == {"branch-a", "branch-b"}

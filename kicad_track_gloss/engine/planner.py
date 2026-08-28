@@ -46,9 +46,6 @@ class PlanningCancelled(RuntimeError):
     """User-requested cooperative stop which must never apply a partial plan."""
 
 
-_INTERACTIVE_CANONICALIZATION_LIMIT = 512
-
-
 def _check_deadline(deadline, cancel_check=None):
     if cancel_check is not None and cancel_check():
         raise PlanningCancelled("Track Gloss was cancelled by the user")
@@ -197,9 +194,6 @@ def _endpoint_moved_into_pad(
 
 
 _SYNTHETIC_PREFIX = "__track_gloss__"
-_REFINEMENT_SCOPE_LIMIT = 128
-
-
 def _proper_intersection(first, second):
     """Return a centreline crossing strictly inside ``first`` when present."""
     a = (first.start_x, first.start_y)
@@ -552,50 +546,13 @@ def _compose_refined_plan(original_model, original_eligible, final_model,
                 "Composed candidate violates {}".format(blocker[0]))
     validate_result(original_model, set(original_eligible), result)
     return result
-def _refine_plan(model, eligible, initial, planner_kwargs, max_passes=3):
-    if not initial.changed:
-        return initial
-    simulated, current_eligible = _apply_to_model(
-        model, set(eligible), initial, 0)
-    passes = [initial]
-    pruned_stubs = []
-    for pass_index in range(1, max_passes + 1):
-        simulated, current_eligible = _split_eligible_intersections(
-            simulated, current_eligible, pass_index)
-        simulated, current_eligible, removed = _prune_generated_stubs(
-            simulated, current_eligible)
-        pruned_stubs.extend(removed)
-        refinement_kwargs = dict(planner_kwargs)
-        refinement_kwargs["solution_rank"] = 0
-        step = smooth_selected_chains(
-            simulated, current_eligible, span_strategy="global",
-            path_preference=0, **refinement_kwargs)
-        if not step.changed:
-            break
-        passes.append(step)
-        simulated, current_eligible = _apply_to_model(
-            simulated, current_eligible, step, pass_index)
-    refined = _compose_refined_plan(
-        model, eligible, simulated, current_eligible, passes, pruned_stubs)
-
-    def objective(plan):
-        return (
-            plan.angle_corrections, round(plan.saved_mm, 9),
-            len(plan.remove_keys) - len(plan.additions),
-            -len(plan.additions))
-
-    # A newly available safe candidate can alter a later refinement pass, but
-    # it must never make the final answer worse than the already-valid initial
-    # optimum. This also makes relaxing an over-conservative rule monotonic.
-    return refined if objective(refined) > objective(initial) else initial
 
 
 def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                            clearance=0.1,
                            equal_length_tolerance=None,
-                           span_strategy="farthest", path_preference=0,
                            solution_rank=0,
-                           allow_internal_translations=True,
+                           preserve_routed_corridor=False,
                            allow_track_terminal_sliding=True,
                            allow_pad_terminal_sliding=True,
                            collect_statistics=True, planner_context=None,
@@ -721,19 +678,21 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                                  start_pads or end_pads)):
                             continue
                         paths = []
-                        for candidate_start, candidate_end in movable_endpoint_pairs(
-                                points[i], points[j], start_targets, end_targets,
-                                start_pads, end_pads):
-                            if length(candidate_start, candidate_end) <= 1e-9:
-                                continue
-                            for path in octolinear_paths(candidate_start, candidate_end):
+                        if not preserve_routed_corridor:
+                            for candidate_start, candidate_end in movable_endpoint_pairs(
+                                    points[i], points[j], start_targets, end_targets,
+                                    start_pads, end_pads):
+                                if length(candidate_start, candidate_end) <= 1e-9:
+                                    continue
+                                for path in octolinear_paths(
+                                        candidate_start, candidate_end):
+                                    if path not in paths:
+                                        paths.append(path)
+                            for path in _custom_pad_event_paths(
+                                    points, i, j, span, planner_context,
+                                    clearance):
                                 if path not in paths:
                                     paths.append(path)
-                        for path in _custom_pad_event_paths(
-                                points, i, j, span, planner_context,
-                                clearance):
-                            if path not in paths:
-                                paths.append(path)
                         if j == i + 2:
                             chamfer = maximal_corner_chamfer_path(
                                 points, i, span, model, planner_context,
@@ -742,15 +701,14 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                                 cancel_check)
                             if chamfer is not None and chamfer not in paths:
                                 paths.append(chamfer)
-                        if allow_internal_translations and j == i + 3:
+                        if j == i + 3:
                             for translated in internal_segment_translation_paths(
                                     points, i, span, model, planner_context,
                                     clearance, replaced, immutable_cover_keys,
-                                    _check_deadline, deadline, cancel_check):
+                                    _check_deadline, deadline, cancel_check,
+                                    min_gain):
                                 if translated not in paths:
                                     paths.append(translated)
-                        if path_preference:
-                            paths.reverse()
                         for path in paths:
                             _check_deadline(deadline, cancel_check)
                             if collect_statistics:
@@ -769,7 +727,8 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                                 gain >= -equal_length_tolerance)
                             acceptable = (
                                 angle_corrections > 0 or
-                                gain >= min_gain or simplifies)
+                                gain + equal_length_tolerance >= min_gain or
+                                simplifies)
                             if not acceptable:
                                 if collect_statistics:
                                     _increment(result.search_counts, "not_improving")
@@ -814,72 +773,51 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                             choices.append((j, path, gain, replaced,
                                             new_count, old_len,
                                             angle_corrections, additions))
-                        if choices and span_strategy == "farthest":
-                            break
                     return choices
 
-                spans = {}
-                if span_strategy == "global":
-                    # Weighted interval scheduling: maximize total saved length
-                    # over the WHOLE chain, then segment reduction. This avoids
-                    # the A-before-B bias of greedy shortcut acceptance.
-                    options = {i: choices_at(i) for i in range(len(chain))}
-                    retained_solutions = max(3, int(solution_rank) + 1)
-                    best = {len(chain): [(0, 0.0, 0, [])]}
-                    for i in range(len(chain) - 1, -1, -1):
-                        candidates_dp = list(best.get(
-                            i + 1, [(0, 0.0, 0, [])]))
-                        for choice in options.get(i, ()):
-                            (j, path, gain, replaced, new_count, _old_len,
-                             corrections, _additions) = choice
-                            reduction = (j - i) - new_count
-                            for tail in best.get(j, [(0, 0.0, 0, [])]):
-                                candidates_dp.append((
-                                    corrections + tail[0], gain + tail[1],
-                                    reduction + tail[2],
-                                    [(i, choice)] + tail[3]))
+                # One global rule: weighted interval scheduling maximizes the
+                # complete chain objective.  The removed greedy modes could
+                # produce a different gloss solely from search order.
+                options = {i: choices_at(i) for i in range(len(chain))}
+                retained_solutions = max(1, int(solution_rank) + 1)
+                best = {len(chain): [(0, 0.0, 0, [])]}
+                for i in range(len(chain) - 1, -1, -1):
+                    candidates_dp = list(best.get(
+                        i + 1, [(0, 0.0, 0, [])]))
+                    for choice in options.get(i, ()):
+                        (j, path, gain, replaced, new_count, _old_len,
+                         corrections, _additions) = choice
+                        reduction = (j - i) - new_count
+                        for tail in best.get(j, [(0, 0.0, 0, [])]):
+                            candidates_dp.append((
+                                corrections + tail[0], gain + tail[1],
+                                reduction + tail[2],
+                                [(i, choice)] + tail[3]))
 
-                        def dp_key(candidate):
-                            signature = tuple((start, selected[0], tuple(selected[1]))
-                                              for start, selected in candidate[3])
-                            return (candidate[0], round(candidate[1], 9), candidate[2],
-                                    tuple((-a, -b, path) for a, b, path in signature))
+                    def dp_key(candidate):
+                        signature = tuple(
+                            (start, selected[0], tuple(selected[1]))
+                            for start, selected in candidate[3])
+                        return (
+                            candidate[0], round(candidate[1], 9), candidate[2],
+                            tuple((-a, -b, path) for a, b, path in signature))
 
-                        unique_dp = {}
-                        for candidate in candidates_dp:
-                            signature = tuple(
-                                (start, selected[0], tuple(selected[1]))
-                                for start, selected in candidate[3])
-                            previous = unique_dp.get(signature)
-                            if (previous is None or
-                                    dp_key(candidate) > dp_key(previous)):
-                                unique_dp[signature] = candidate
-                        best[i] = sorted(
-                            unique_dp.values(), key=dp_key, reverse=True
-                        )[:retained_solutions]
-                    selected_solution = best[0][min(
-                        max(0, int(solution_rank)), len(best[0]) - 1)]
-                    spans = {start: selected
-                             for start, selected in selected_solution[3]}
-                else:
-                    i = 0
-                    while i < len(chain):
-                        choices = choices_at(i)
-                        if choices:
-                            if span_strategy == "max_gain":
-                                choices.sort(key=lambda c: (-c[6], -c[2], c[4],
-                                                           -c[0], tuple(c[1])))
-                            elif span_strategy == "farthest":
-                                choices.sort(key=lambda c: (-c[6], -c[0], -c[2],
-                                                           c[4], tuple(c[1])))
-                            found = choices[0]
-                        else:
-                            found = None
-                        if found:
-                            spans[i] = found
-                            i = found[0]
-                        else:
-                            i += 1
+                    unique_dp = {}
+                    for candidate in candidates_dp:
+                        signature = tuple(
+                            (start, selected[0], tuple(selected[1]))
+                            for start, selected in candidate[3])
+                        previous = unique_dp.get(signature)
+                        if (previous is None or
+                                dp_key(candidate) > dp_key(previous)):
+                            unique_dp[signature] = candidate
+                    best[i] = sorted(
+                        unique_dp.values(), key=dp_key, reverse=True
+                    )[:retained_solutions]
+                selected_solution = best[0][min(
+                    max(0, int(solution_rank)), len(best[0]) - 1)]
+                spans = {start: selected
+                         for start, selected in selected_solution[3]}
                 if not spans:
                     continue
                 k = 0
@@ -931,21 +869,16 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
     validate_result(model, eligible, result)
     return result
 
-_MAX_LOCAL_JUNCTION_SCOPES = 4
-_LOCAL_JUNCTION_ELIGIBLE_LIMIT = 16
-
-
-def _junction_branch_scopes(model, eligible_segment_keys,
-                            limit=_MAX_LOCAL_JUNCTION_SCOPES):
+def _junction_branch_scopes(model, eligible_segment_keys):
     """Return deterministic proper branch scopes around selected junctions.
 
     Only endpoint incidence is used here, matching chain construction. Each
     walk moves away from a junction through pure degree-two continuation and
-    stops at the next anchor. The hard cap prevents whole-board selections
-    from turning into a combinatorial subset search.
+    stops at the next anchor.  Every proper branch is returned; the operation
+    deadline, rather than a geometry-dependent count cutoff, bounds work.
     """
     eligible = set(eligible_segment_keys)
-    if len(eligible) < 2 or len(eligible) > _LOCAL_JUNCTION_ELIGIBLE_LIMIT:
+    if len(eligible) < 2:
         return ()
     selected = [segment for segment in model.segments
                 if segment_key(segment) in eligible and
@@ -996,7 +929,7 @@ def _junction_branch_scopes(model, eligible_segment_keys,
             for key in scope))
 
     return tuple(sorted(scopes, key=lambda scope: (
-        -len(scope), scope_geometry(scope))))[:max(0, int(limit))]
+        -len(scope), scope_geometry(scope))))
 
 
 def _group_dependency_signature(model, eligible_segment_keys, context):
@@ -1053,15 +986,12 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
     cancellation_grace_seconds = kwargs.pop(
         "cancellation_grace_seconds", 1.0)
     _check_deadline(deadline, cancel_check)
-    max_refinement_passes = kwargs.pop("max_refinement_passes", 3)
     parallel = kwargs.pop("parallel", False)
     converge_groups = kwargs.pop("converge_groups", False)
     group_max_passes = kwargs.pop("group_max_passes", 6)
     group_plan_cache = kwargs.pop("_group_plan_cache", None)
-    allow_netclass_seed = kwargs.pop("_allow_netclass_seed", True)
     allow_junction_scopes = kwargs.pop(
-        "_allow_junction_scopes",
-        len(set(eligible_segment_keys)) <= _LOCAL_JUNCTION_ELIGIBLE_LIMIT)
+        "_allow_junction_scopes", True)
     kwargs.setdefault("planner_context", PlannerContext(model))
     plans = []
     seen = set()
@@ -1274,32 +1204,15 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
     else:
         try:
             add_plan(smooth_selected_chains(
-                model, eligible_segment_keys, span_strategy="global",
-                path_preference=0, cancel_check=cancel_check, **kwargs),
+                model, eligible_segment_keys,
+                cancel_check=cancel_check, **kwargs),
                 already_validated=True)
         except ValueError as error:
             rejected.append(str(error))
-        if (kwargs.get("allow_internal_translations", True) and
-                len(eligible) >= 3 and
-                (deadline is None or time.monotonic() < deadline)):
-            # New local operators must be monotone with respect to the former
-            # search space. Keep the translation-free optimum beside the new
-            # optimum so a later composition failure cannot erase a safe plan
-            # that was available before translations were introduced.
-            legacy_kwargs = dict(kwargs)
-            legacy_kwargs["allow_internal_translations"] = False
-            try:
-                add_plan(smooth_selected_chains(
-                    model, eligible_segment_keys, span_strategy="global",
-                    path_preference=0, cancel_check=cancel_check,
-                    **legacy_kwargs), already_validated=True)
-            except ValueError as error:
-                rejected.append(str(error))
-
     # Eligibility is authorization, not an obligation to move every selected
     # segment. At a selected T, treating every authorized branch as mutable can
     # remove a sliding target and make a larger selection worse than a smaller
-    # one. Preserve a bounded set of branch-local alternatives, with all other
+    # one. Preserve every branch-local alternative, with all other
     # authorized copper temporarily immutable for that candidate.
     if allow_junction_scopes:
         for branch_scope in _junction_branch_scopes(model, eligible):
@@ -1308,7 +1221,7 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
             try:
                 branch_plan = generate_converged_plan(
                     model, branch_scope,
-                    max_passes=max(1, min(group_max_passes, 4)),
+                    max_passes=max(1, group_max_passes),
                     return_partial_on_limit=True,
                     batch_group_convergence=False,
                     parallel=False,
@@ -1344,8 +1257,8 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
         for group_key in group_keys:
             try:
                 plan = smooth_selected_chains(
-                    model, groups[group_key], span_strategy="global",
-                    path_preference=0, cancel_check=cancel_check, **kwargs)
+                    model, groups[group_key],
+                    cancel_check=cancel_check, **kwargs)
                 if plan.changed:
                     group_plans.append(plan)
             except ValueError as error:
@@ -1387,62 +1300,6 @@ def generate_candidate_plans(model, eligible_segment_keys, **kwargs):
         plans[0].warnings.append(
             "Interactive planning time budget reached; a validated partial "
             "group plan was retained.")
-    elif (plans[0].changed and max_refinement_passes and
-          (deadline is None or time.monotonic() < deadline) and
-          len(set(eligible_segment_keys)) <= _REFINEMENT_SCOPE_LIMIT):
-        try:
-            plans[0] = _refine_plan(
-                model, eligible_segment_keys, plans[0],
-                dict(kwargs, cancel_check=cancel_check),
-                max_refinement_passes)
-            plans.sort(key=lambda p: (
-                -p.angle_corrections, -round(p.saved_mm, 9),
-                -(len(p.remove_keys) - len(p.additions)), len(p.additions),
-                removal_signature(p)))
-        except ValueError as error:
-            plans[0].warnings.append("Refinement rejected: " + str(error))
-
-    # With mixed widths, relaxing a clearance can expose a different first
-    # refinement and occasionally lead the local search to a worse basin. A
-    # second, more conservative netclass seed preserves the former safe
-    # solution as a candidate. It is intentionally limited to mixed-width
-    # scopes, where width-run topology makes this useful, and cannot recurse.
-    selected_segments = [
-        segment for segment in model.segments
-        if segment_key(segment) in eligible]
-    widths_by_group = defaultdict(set)
-    for segment in selected_segments:
-        widths_by_group[(segment.net_id, segment.layer)].add(
-            round(segment.width, 6))
-    mixed_width = any(len(widths) > 1
-                      for widths in widths_by_group.values())
-    resolved_differs = any(
-        segment.clearance >= 0.0 and
-        abs(segment.clearance - max(
-            model.minimum_clearance,
-            model.net_clearances.get(segment.net_id, 0.0))) > 1e-9
-        for segment in selected_segments)
-    if (allow_netclass_seed and mixed_width and resolved_differs and
-            (deadline is None or time.monotonic() < deadline)):
-        fallback_model = replace(
-            model, segments=[replace(segment, clearance=-1.0)
-                             for segment in model.segments])
-        fallback_kwargs = dict(kwargs)
-        fallback_kwargs.pop("planner_context", None)
-        try:
-            fallback = generate_candidate_plans(
-                fallback_model, eligible_segment_keys,
-                max_refinement_passes=max_refinement_passes,
-                parallel=False, _allow_netclass_seed=False,
-                **fallback_kwargs)[0]
-            if fallback.changed:
-                add_plan(fallback)
-        except ValueError as error:
-            rejected.append(str(error))
-        plans.sort(key=lambda p: (
-            -p.angle_corrections, -round(p.saved_mm, 9),
-            -(len(p.remove_keys) - len(p.additions)), len(p.additions),
-            removal_signature(p)))
     return plans
 
 
@@ -1675,28 +1532,18 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
     _check_deadline(deadline, cancel_check)
     source_model = _canonicalize_model_segments(model)
     source_eligible = set(eligible_segment_keys)
-    # Scopes above the refinement limit use the exact same unrefined opening
-    # pass as the conservative candidate. Preserve that already-built
-    # plan for the native-DRC ladder instead of recomputing the whole board
-    # after a rejection.  Small scopes retain the historical fallback because
-    # their opening candidate may have undergone local refinement.
-    preserve_conservative = (
-        conservative_ladder is not None and
-        len(source_eligible) > _REFINEMENT_SCOPE_LIMIT and
-        kwargs.get("max_refinement_passes", 3) != 0)
-    subdivision_canonicalization_skipped = (
-        deadline is not None and
-        len(source_eligible) > _INTERACTIVE_CANONICALIZATION_LIMIT)
-    if subdivision_canonicalization_skipped:
-        model, original_eligible, input_expansions = (
-            source_model, set(source_eligible), {})
-    else:
-        model, original_eligible, input_expansions = \
-            _canonicalize_eligible_subdivisions(source_model, source_eligible)
+    # The first complete step is an exact visited state, not a reconstructed
+    # fallback.  Preserve it for every scope whenever the caller requests a
+    # native-validation ladder; connection quality must not depend on an
+    # arbitrary track-count threshold.
+    preserve_conservative = conservative_ladder is not None
+    model, original_eligible, input_expansions = \
+        _canonicalize_eligible_subdivisions(source_model, source_eligible)
     model = _canonicalize_model_segments(model)
     current_model = model
     current_eligible = set(original_eligible)
     changed_steps = []
+    pruned_stubs = []
     group_plan_cache = {}
     seen = set()
     final_search = None
@@ -1736,14 +1583,6 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
         pass_kwargs = dict(kwargs)
         pass_kwargs["solution_rank"] = (
             opening_solution_rank if pass_index == 0 else 0)
-        # One opening refinement is semantically useful: terminal placement
-        # can expose a simplification that disappears after the one-shot plan
-        # is recomposed. Later outer passes already rebuild the whole topology,
-        # so repeating nested refinement there is redundant and expensive.
-        configured_refinement = max(
-            0, int(kwargs.get("max_refinement_passes", 3)))
-        pass_kwargs["max_refinement_passes"] = (
-            min(1, configured_refinement) if pass_index == 0 else 0)
         if batch_group_convergence and "converge_groups" not in pass_kwargs:
             # Preserve the established first-pass basin. Once that broad
             # global edit has opened local simplifications, converge each
@@ -1792,6 +1631,16 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
         for step in changed_plans:
             raw_proposed_model, raw_proposed_eligible = _apply_to_model(
                 current_model, current_eligible, step, pass_index)
+            # New same-net intersections and removable tails are part of the
+            # same outer state transition.  They used to live in a nested
+            # refinement loop with a separate pass limit, which meant that
+            # two notions of convergence could disagree.
+            raw_proposed_model, raw_proposed_eligible = \
+                _split_eligible_intersections(
+                    raw_proposed_model, raw_proposed_eligible, pass_index)
+            (raw_proposed_model, raw_proposed_eligible,
+             newly_pruned) = _prune_generated_stubs(
+                 raw_proposed_model, raw_proposed_eligible)
             # The live adapter writes each collinear replacement as the
             # compact final track set. Continue searching on that same
             # topology; otherwise a final-only merge can expose an A1 -> A2
@@ -1821,18 +1670,20 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
                 try:
                     composed = _compose_refined_plan(
                         model, original_eligible, proposed_model,
-                        proposed_eligible, changed_steps + [step], [])
+                        proposed_eligible, changed_steps + [step],
+                        pruned_stubs + newly_pruned)
                     source_proposed, source_proposed_eligible = \
                         _restore_unchanged_subdivisions(
                             proposed_model, proposed_eligible, input_expansions)
                     source_composed = _compose_refined_plan(
                         source_model, source_eligible, source_proposed,
-                        source_proposed_eligible, changed_steps + [step], [])
+                        source_proposed_eligible, changed_steps + [step],
+                        pruned_stubs + newly_pruned)
                 except ValueError as error:
                     rejected_steps.append(str(error))
                     continue
                 accepted = (step, proposed_model, proposed_eligible, composed,
-                            source_composed)
+                            source_composed, newly_pruned)
                 break
             if accepted is not None:
                 break
@@ -1843,9 +1694,10 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
                 "; ".join(sorted(set(rejected_steps))))
             break
         (step, proposed_model, proposed_eligible, last_composed,
-         last_source_composed) = accepted
+         last_source_composed, newly_pruned) = accepted
         changed_steps.append(step)
-        if preserve_conservative and len(changed_steps) == 1:
+        pruned_stubs.extend(newly_pruned)
+        if preserve_conservative:
             conservative = replace(
                 last_source_composed,
                 remove_keys=list(last_source_composed.remove_keys),
@@ -1854,7 +1706,7 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
                 transformations=list(last_source_composed.transformations),
                 search_counts=dict(last_source_composed.search_counts),
                 blocking_nets=dict(last_source_composed.blocking_nets),
-                convergence_passes=1,
+                convergence_passes=len(changed_steps),
                 fixed_point=False)
             conservative_ladder.append(conservative)
         if (deadline is not None and
@@ -1890,10 +1742,6 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
     if not changed_steps:
         final_search.convergence_passes = 0
         final_search.fixed_point = not deadline_reached
-        if subdivision_canonicalization_skipped:
-            final_search.warnings.append(
-                "Large interactive scope used bounded group planning; exhaustive "
-                "segment-subdivision canonicalization is reserved for the CLI.")
         return final_search
 
     if deadline_reached and last_source_composed is not None:
@@ -1903,7 +1751,7 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
             current_model, current_eligible, input_expansions)
         result = _compose_refined_plan(
             source_model, source_eligible, current_model, current_eligible,
-            changed_steps, [])
+            changed_steps, pruned_stubs)
     # Nanometre quantization can collapse an analytical micro-adjustment back
     # to identity. Report applied passes, not discarded internal exploration.
     result.convergence_passes = len(changed_steps) if result.changed else 0
@@ -1924,8 +1772,4 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
         for key, value in final_search.blocking_nets.items():
             result.blocking_nets[key] = result.blocking_nets.get(key, 0) + value
         result.warnings.extend(final_search.warnings)
-    if subdivision_canonicalization_skipped:
-        result.warnings.append(
-            "Large interactive scope used bounded group planning; exhaustive "
-            "segment-subdivision canonicalization is reserved for the CLI.")
     return result

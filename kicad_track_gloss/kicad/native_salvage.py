@@ -141,10 +141,12 @@ def maximize_safe_native_candidates(
     # KiCad's baseline DRC is shared, so this preserves both the historical
     # conservative success and a useful local result without another serial
     # baseline run.
+    fixed_candidates = [
+        plan for plan in rank_candidate_plans(
+            tuple(connection_plans) + tuple(ranked))
+        if _fixed_endpoint_only(plan)]
     fixed_core = _compose_available(
-        model, eligible_keys,
-        [plan for plan in rank_candidate_plans(connection_plans)
-         if _fixed_endpoint_only(plan)])
+        model, eligible_keys, fixed_candidates)
     local_anchor = fixed_core or next((
         plan for plan in rank_candidate_plans(connection_plans)
         if plan_identity(plan) != plan_identity(primary)), None)
@@ -159,6 +161,20 @@ def maximize_safe_native_candidates(
             all(plan_identity(local_anchor) != plan_identity(plan)
                 for plan in initial)):
         initial.append(local_anchor)
+    # A maximal fixed-endpoint translation and its least-invasive qualifying
+    # state can differ under KiCad's zone-connectivity authority.  Use any
+    # remaining native worker for the next exact fixed-endpoint candidate
+    # before considering another movable-terminal basin.
+    fixed_visited = [plan for plan in fixed_candidates
+                     if not plan.fixed_point]
+    fixed_final = [plan for plan in fixed_candidates
+                   if plan.fixed_point]
+    for fixed in fixed_visited + fixed_final:
+        if len(initial) >= 3:
+            break
+        if all(plan_identity(fixed) != plan_identity(plan)
+               for plan in initial):
+            initial.append(fixed)
     # Fill every available native process with a distinct geometry.  This is
     # essential for one-connection glosses, which have no independent local
     # connection to use as ``local_anchor``.
@@ -209,6 +225,52 @@ def maximize_safe_native_candidates(
             decision.plan is not None and
             plan_identity(decision.plan) != plan_identity(primary))
         return decision
+
+    # Three native processes are a concurrency width, not a quality cutoff.
+    # If the first wave contains no safe state, continue through the remaining
+    # geometries in rank order while time remains.  A former implicit top-three
+    # rule could turn a perfectly valid fourth local translation into a no-op.
+    if decision.plan is None:
+        pending_ranked = [
+            plan for plan in ranked
+            if plan_identity(plan) not in initial_identities]
+        for offset in range(0, len(pending_ranked), 3):
+            if (operation_deadline is not None and
+                    time.monotonic() >= operation_deadline):
+                break
+            wave = pending_ranked[offset:offset + 3]
+            remaining = (None if operation_deadline is None else
+                         max(0.0, operation_deadline - time.monotonic()))
+            stage_started = time.monotonic()
+            if len(wave) > 1:
+                wave_results = adapter.validate_plan_ladder(
+                    board, wave, force_native=force_native,
+                    skip_native=skip_native, timeout_seconds=remaining,
+                    wait_callback=wait_callback)
+            else:
+                wave_results = [adapter.validate_plan(
+                    board, wave[0], force_native=force_native,
+                    skip_native=skip_native, timeout_seconds=remaining,
+                    wait_callback=wait_callback)]
+            decision.followup_validation_ms += (
+                time.monotonic() - stage_started) * 1000.0
+            decision.followup_validations += sum(
+                result.validation_mode != "not_needed"
+                for result in wave_results)
+            for plan, native in zip(wave, wave_results):
+                last_native = native
+                if native.allowed:
+                    decision.plan = plan
+                    decision.native = native
+                    break
+            terminal_error = next((
+                result for result in wave_results
+                if result.error or result.validation_mode == "native_timeout"),
+                None)
+            if decision.plan is not None or terminal_error is not None:
+                if terminal_error is not None and decision.native is None:
+                    decision.native = terminal_error
+                break
 
     # A rejected full local composition is only an upper bound.  Its safe
     # subsets may still beat the incumbent, so use the remaining budget while

@@ -323,6 +323,7 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
      version, config) = _bootstrap_engine()
     from kicad_track_gloss.engine import (
         compose_compatible_connection_plans, generate_connection_candidates,
+        generate_single_connection_alternatives, plan_identity,
         rank_candidate_plans)
     from kicad_track_gloss.engine.model import GlossResult
     from kicad_track_gloss.kicad.native_salvage import (
@@ -425,8 +426,23 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
         planning_candidates = [global_plan]
         if connection_plan is not None and connection_plan.changed:
             planning_candidates.append(connection_plan)
-        if conservative_ladder and conservative_ladder[0].changed:
-            planning_candidates.append(conservative_ladder[0])
+        planning_candidates.extend(
+            plan for plan in conservative_ladder if plan.changed)
+        if (len(connection_scopes) == 1 and global_plan.changed and
+                (planning_deadline is None or
+                 time.monotonic() < planning_deadline)):
+            stage_started = time.monotonic()
+            planning_candidates.extend(generate_single_connection_alternatives(
+                initial.model, eligible, global_plan,
+                min_gain=minimum_saved_length_mm,
+                clearance=initial.minimum_clearance,
+                group_max_passes=max_passes,
+                collect_statistics=False,
+                planning_deadline=planning_deadline,
+                cancellation_grace_seconds=(
+                    config.timing.interactive_cancellation_grace_seconds)))
+            timings_ms["planning_single_connection"] = (
+                time.monotonic() - stage_started) * 1000.0
         planning_candidates = list(rank_candidate_plans(planning_candidates))
         best = planning_candidates[0]
         native = None
@@ -440,10 +456,10 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
         connections_planned = 0
         if best.changed:
             stage_started = time.monotonic()
-            conservative = (
-                conservative_ladder[0]
-                if conservative_ladder and conservative_ladder[0].changed
-                else None)
+            conservative = next((
+                plan for plan in rank_candidate_plans(conservative_ladder)
+                if plan.changed and
+                plan_identity(plan) != plan_identity(global_plan)), None)
             decision = maximize_safe_native_candidates(
                 adapter, board, initial.model, eligible,
                 planning_candidates, conservative_plan=conservative,

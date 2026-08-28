@@ -14,6 +14,6 @@
     "cli_total_time_budget_seconds": null
   },
   "safety": {
-    "kicad_drc_for_single_track": true
+    "use_kicad_native_drc": true
   }
 }

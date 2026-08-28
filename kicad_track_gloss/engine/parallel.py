@@ -172,8 +172,7 @@ def _worker(input_path, output_path):
                     **worker_kwargs)
             else:
                 plan = smooth_selected_chains(
-                    model, set(eligible), span_strategy="global",
-                    path_preference=0, planner_context=context,
+                    model, set(eligible), planner_context=context,
                     **payload["kwargs"])
             rows.append((group_key, _encode_plan(plan), ""))
         except Exception as error:

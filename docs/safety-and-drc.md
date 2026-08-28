@@ -15,8 +15,9 @@ Copper layers come from KiCad semantic layer APIs, not display names or string
 suffixes. Through-hole pads and through-vias therefore remain obstacles on all
 applicable copper layers even if internal layers have custom names.
 
-Pad checks use actual rotated circle, rectangle, oval, rounded-rectangle, and
-effective custom-pad copper. Edge checks use the chained Edge.Cuts outline,
+Every via padstack diameter and every evaluated via/pad clearance is captured
+separately for each copper layer. Pad checks use actual rotated circle,
+rectangle, oval, rounded-rectangle, and effective custom-pad copper. Edge checks use the chained Edge.Cuts outline,
 including arcs and internal holes, rather than only the board bounding box.
 
 These checks are intentionally conservative but cannot reproduce every KiCad
@@ -66,19 +67,21 @@ the board has no zones and every added segment lies wholly inside copper being
 removed. Ordinary corner cutting, endpoint relocation, pad sliding, and T
 sliding do not meet this proof.
 
-The session setting for a one-track selection is an explicit user safety/
-latency trade-off. When disabled, the internal checks remain active but the
-native before/after gate is skipped for that case. The normal packaged default
-is enabled.
+The session setting is an explicit user safety/latency trade-off applying to
+both a single connection and a multi-net selection. When disabled, the
+internal checks remain active but the native before/after gate is skipped.
+The packaged default is enabled.
 
 ## Candidate ladder and connection-local recovery
 
-For one selected connection, the planner builds up to three distinct,
-fixed-point glosses: every terminal movable, track intersections retained, and
-pad contacts retained (with fixed electrical terminals used when needed for a
-third distinct result).  They share one parallel native-DRC wave.  This keeps
-a rejected aggressive terminal relocation from hiding a safe segment
-translation.  Every candidate passes the complete internal gate first.
+For one selected connection, the planner explores two complete domains:
+octolinear reconstruction and corridor-preserving interior translation/corner
+cutting. It also explores the applicable movable/fixed track and pad terminal
+domains. Every exact state visited while converging is retained, so a native
+rejection of the geometric fixed point cannot erase an earlier safe pass.
+Three DRC processes are used concurrently, but three is a process width rather
+than a candidate cutoff; later waves continue while time remains. Every
+candidate passes the complete internal gate first.
 
 KiCad recreates the identity and reported position of an unconnected item when
 the touched tracks are rebuilt.  This category is therefore compared by its

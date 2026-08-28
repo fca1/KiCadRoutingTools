@@ -205,7 +205,7 @@ Créer un JSON versionné et validé strictement, avec au minimum :
     "interactive_cancellation_grace_seconds": 1.0,
     "cli_total_time_budget_seconds": null
   },
-  "safety": {"kicad_drc_for_single_track": true}
+  "safety": {"use_kicad_native_drc": true}
 }
 ```
 

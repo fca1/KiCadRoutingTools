@@ -16,9 +16,10 @@ reject a result. A valid no-op plays KiCad's standard warning sound once.
   Result, Details, and JSON tabs with copy actions.
 
 Run either action without a selected straight segment to edit in-memory session
-settings. The first setting controls native KiCad DRC for a one-track
-selection: disabling it is substantially faster, but removes that native
-before/after safety check. The packaged default is enabled.
+settings. The first setting controls native KiCad DRC for both single-
+connection and multi-net selections: disabling it is substantially faster,
+but removes that native before/after safety check. The packaged default is
+enabled.
 
 Native validation uses private temporary board copies, refills zones, and
 compares KiCad DRC reports before and after the candidate. This can add seconds

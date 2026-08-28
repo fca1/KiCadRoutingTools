@@ -21,11 +21,10 @@ _HELP = {
     "grace": (
         "Extra seconds allowed for worker processes to stop cleanly after a "
         "planning deadline."),
-    "single_drc": (
-        "Run KiCad's native DRC even when the initial selection contains only "
-        "one track segment. Uncheck this option for a much faster and smoother "
-        "interactive gloss. The internal geometric safety checks remain active, "
-        "but the final native KiCad DRC safety gate is skipped."),
+    "native_drc": (
+        "Run KiCad's native DRC for every selected scope, whether it contains "
+        "one connection or multiple nets. Unchecking this option skips the "
+        "final native gate; the internal geometric safety checks remain active."),
 }
 
 
@@ -80,13 +79,10 @@ def show_session_settings(parent=None):
     grace = _double_control(
         dialog, policy.timing.interactive_cancellation_grace_seconds,
         0.0, 30.0, 0.1, 1)
-    single_drc = wx.CheckBox(
-        dialog,
-        label=("Use native KiCad DRC (uncheck for a much faster, smoother "
-               "single-track gloss)"))
-    single_drc.SetValue(policy.safety.kicad_drc_for_single_track)
+    native_drc = wx.CheckBox(dialog, label="Use KiCad native DRC")
+    native_drc.SetValue(policy.safety.use_kicad_native_drc)
 
-    add_row("Single-track DRC", single_drc, _HELP["single_drc"])
+    add_row("Native DRC", native_drc, _HELP["native_drc"])
     add_row("Minimum saved length (mm)", minimum, _HELP["minimum"])
     add_row("Total interactive budget (s)", total_budget,
             _HELP["total_budget"])
@@ -121,7 +117,7 @@ def show_session_settings(parent=None):
                 interactive_total_time_budget_seconds=total_budget.GetValue(),
                 interactive_planning_time_budget_seconds=planning_budget.GetValue(),
                 interactive_cancellation_grace_seconds=grace.GetValue(),
-                kicad_drc_for_single_track=single_drc.GetValue())
+                use_kicad_native_drc=native_drc.GetValue())
         except ValueError as error:
             warning = wx.MessageDialog(
                 dialog, str(error), "Invalid Track Gloss setting",

@@ -44,7 +44,24 @@ def _line_chain_points(adapter, chain):
                  for index in range(chain.PointCount()))
 
 
-def _pad_regions(adapter, pad, layers, net_id, clearance):
+def _resolved_clearance(adapter, item, layer):
+    """Return KiCad's evaluated item/layer clearance without fallback."""
+    return adapter.to_mm(item.GetOwnClearance(layer))
+
+
+def _via_obstacles(adapter, board, item):
+    """Represent a via with its exact padstack and rule result per layer."""
+    x, y = adapter.point_mm(item.GetPosition())
+    net_id = int(item.GetNetCode())
+    return tuple(
+        CircleObstacle(
+            x, y, adapter.to_mm(item.GetWidth(layer)) / 2.0,
+            net_id, (layer,), "via",
+            _resolved_clearance(adapter, item, layer))
+        for layer in _via_copper_layers(adapter, board, item))
+
+
+def _pad_regions(adapter, pad, layers, net_id):
     """Return exact effective copper polygons, one layer-specific region each."""
     regions = []
     for layer in layers:
@@ -68,8 +85,21 @@ def _pad_regions(adapter, pad, layers, net_id, clearance):
         regions.append(PadRegion(
             (x0 + x1) / 2.0, (y0 + y1) / 2.0,
             x1 - x0, y1 - y0, 0.0, "custom", 0.0,
-            net_id, (layer,), clearance, tuple(polygons)))
+            net_id, (layer,), _resolved_clearance(adapter, pad, layer),
+            tuple(polygons)))
     return regions
+
+
+def _analytic_pad_regions(adapter, pad, layers, net_id, shape):
+    """Represent a native analytic pad independently on every copper layer."""
+    x, y = adapter.point_mm(pad.GetPosition())
+    size = pad.GetSize()
+    return tuple(PadRegion(
+        x, y, adapter.to_mm(size.x), adapter.to_mm(size.y),
+        float(pad.GetOrientationDegrees()), shape,
+        adapter.to_mm(pad.GetRoundRectCornerRadius()), net_id, (layer,),
+        _resolved_clearance(adapter, pad, layer))
+        for layer in layers)
 
 
 def read_snapshot(adapter, board, require_selection=True):
@@ -80,11 +110,7 @@ def read_snapshot(adapter, board, require_selection=True):
     selected_authorities = {}
     for item in board.GetTracks():
         if is_via(adapter.pcbnew, item):
-            x, y = adapter.point_mm(item.GetPosition())
-            diameter = adapter.to_mm(item.GetWidth(item.TopLayer()))
-            layers = _via_copper_layers(adapter, board, item)
-            obstacles.append(CircleObstacle(x, y, diameter / 2.0,
-                                            int(item.GetNetCode()), layers, "via"))
+            obstacles.extend(_via_obstacles(adapter, board, item))
             if item.IsSelected():
                 warnings.append("Selected vias are protected and will not be modified.")
             continue
@@ -117,27 +143,23 @@ def read_snapshot(adapter, board, require_selection=True):
     minimum, edge, net_clearances = native_rules(adapter, board, segments)
     for footprint in footprints:
         for pad in footprint.Pads():
-            x, y = adapter.point_mm(pad.GetPosition())
-            size = pad.GetSize()
             layers = list(copper_layers(adapter, board, pad.GetLayerSet()))
             # Paste/mask-only apertures are not copper obstacles. An empty
             # layer tuple means "all layers" inside the API-neutral model, so
             # retaining such a pad would incorrectly block every copper layer.
             if not layers:
                 continue
-            local_clearance_iu = pad.GetLocalClearance()
-            local_clearance = (0.0 if local_clearance_iu is None else
-                               adapter.to_mm(local_clearance_iu))
             shape = _pad_shape(adapter, pad)
             if shape is not None:
-                pad_regions.append(PadRegion(
-                    x, y, adapter.to_mm(size.x), adapter.to_mm(size.y),
-                    float(pad.GetOrientationDegrees()), shape,
-                    adapter.to_mm(pad.GetRoundRectCornerRadius()),
-                    int(pad.GetNetCode()), tuple(layers), local_clearance))
+                # A padstack can have both different copper shapes and
+                # different evaluated rules on different layers.  Keep each
+                # layer authoritative instead of collapsing it to the local
+                # override (which omits netclass and custom .kicad_dru rules).
+                pad_regions.extend(_analytic_pad_regions(
+                    adapter, pad, layers, int(pad.GetNetCode()), shape))
                 continue
             exact_regions = _pad_regions(
-                adapter, pad, layers, int(pad.GetNetCode()), local_clearance)
+                adapter, pad, layers, int(pad.GetNetCode()))
             if not exact_regions:
                 raise RuntimeError(
                     "KiCad 10 returned no effective copper polygon for pad {}"

@@ -49,8 +49,8 @@ a valid substitute for already discovered safe work.
 - `engine/pads.py`: pad copper containment and bounded contact candidates.
 - `engine/planner.py`: chain discovery, octolinear generation, scheduling,
   alternative composition, and fixed-point convergence.
-- `engine/workflow.py`: shared plugin/CLI candidate ladder and conservative
-  fallback policy.
+- `engine/workflow.py`: shared plugin/CLI candidate domains and visited-state
+  ladder.
 - `engine/parallel.py`: deterministic worker orchestration with sequential
   fallback.
 - `engine/validation.py`: immutable pre-apply invariants and connectivity.
@@ -89,11 +89,13 @@ reduction, and a stable geometry signature. Independent parallel results are
 sorted before composition. Selection order, net order, file object order, and
 worker completion order must not affect the result.
 
-For small local scopes, bounded branch alternatives keep a larger selection
-from suppressing a better valid sub-scope transformation. Larger scopes use
-the global scheduling algorithm to bound runtime. The planner follows newly
-opened simplifications to a fixed point and composes changed passes against the
-original model, so the live board receives one atomic edit plan.
+Every proper branch alternative is derived from the same electrical incidence;
+there is no track-count cutoff deciding whether a branch deserves gloss. The
+planner uses one weighted interval scheduler, follows newly opened
+simplifications through one outer convergence loop, and composes changed
+passes against the original model so the live board receives one atomic edit
+plan. The former nested refinement loop and greedy/farthest schedulers have
+been removed.
 
 Every selected seed expansion is also retained as a distinct local-connection
 scope. Multi-connection planning rebuilds these scopes through the exact same
@@ -102,8 +104,9 @@ optimum, and ranks that composition alongside the global converged plan. A
 larger selection therefore cannot silently replace a better local result with
 a lower-quality plan.
 
-After a native DRC rejection, up to three connection-local candidates are
-probed in one parallel native wave until a safe base exists. Later DRC waves
+After a native DRC rejection, three connection-local candidates can be probed
+concurrently until a safe base exists. The process count never truncates the
+candidate set. Later DRC waves
 validate the complete remaining batch and complementary partial extensions.
 Every accepted extension
 immediately becomes the retained result, so expiration returns useful work
@@ -117,6 +120,12 @@ data, connectivity, semantic layers, and mutations from `pcbnew`, while its
 candidate generator remains Python and API-neutral. The narrow boundary makes
 it possible to substitute an official optimizer API later without rewriting
 selection, reporting, CLI, or packaging.
+
+The adapter is intentionally the sole owner of SWIG objects. KiCad 10 IPC can
+cover a future live-editor adapter but cannot run this project's headless CLI;
+headless IPC starts with KiCad 11. A future IPC implementation must therefore
+replace the adapter as a whole instead of introducing feature-by-feature
+fallbacks inside the engine.
 
 ## Provenance
 

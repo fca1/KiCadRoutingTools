@@ -16,7 +16,7 @@ from .engine import (find_pad_terminal_targets, find_track_terminal_vertices,
                      compose_compatible_connection_plans,
                      generate_connection_candidates, generate_converged_plan,
                      generate_single_connection_alternatives,
-                     plan_net_ids, rank_candidate_plans,
+                     plan_identity, plan_net_ids, rank_candidate_plans,
                      summarize_plan)
 from .engine.model import GlossResult, segment_key
 from .kicad import BoardAdapter
@@ -214,11 +214,11 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             "Optimization coordinates: exact copper geometry; active KiCad grid not used.")
         report.append(
             "Session policy: minimum saving {:.6f} mm; convergence to fixed "
-            "point (group passes {}); single-track KiCad DRC {}; time budget {:.1f} s "
+            "point (group passes {}); KiCad native DRC {}; time budget {:.1f} s "
             "(planning {:.1f} s).".format(
                 config.gloss.minimum_saved_length_mm,
                 config.convergence.interactive_group_max_passes,
-                "enabled" if config.safety.kicad_drc_for_single_track
+                "enabled" if config.safety.use_kicad_native_drc
                 else "disabled",
                 config.timing.interactive_total_time_budget_seconds,
                 config.timing.interactive_planning_time_budget_seconds))
@@ -350,8 +350,8 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         planning_candidates = [global_plan]
         if connection_plan is not None and connection_plan.changed:
             planning_candidates.append(connection_plan)
-        if conservative_ladder and conservative_ladder[0].changed:
-            planning_candidates.append(conservative_ladder[0])
+        planning_candidates.extend(
+            plan for plan in conservative_ladder if plan.changed)
         if (len(snapshot.connection_scopes) == 1 and global_plan.changed and
                 time.monotonic() < planning_deadline):
             stage_started = time.monotonic()
@@ -365,8 +365,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                     collect_statistics=diagnostic,
                     planning_deadline=planning_deadline,
                     cancellation_grace_seconds=(
-                        config.timing.interactive_cancellation_grace_seconds),
-                    maximum_candidates=3),
+                        config.timing.interactive_cancellation_grace_seconds)),
                 wait_callback)
             planning_candidates.extend(local_candidates)
             timings["single_connection_portfolio"] = (
@@ -404,7 +403,6 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                     "track, insufficient length gain, clearance, pad, via, keepout, or board edge.")
             return False
         stage_started = time.monotonic()
-        single_track_selection = snapshot.selection_seed_count == 1
         drc_budget = operation_deadline - time.monotonic()
         if drc_budget <= 0.0:
             report.append("Result: interactive total time budget reached.")
@@ -412,16 +410,12 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 "The candidate was not sent to KiCad DRC and the current board "
                 "was left unchanged.")
             return False
-        force_native = (
-            single_track_selection and
-            config.safety.kicad_drc_for_single_track)
-        skip_native = (
-            single_track_selection and
-            not config.safety.kicad_drc_for_single_track)
-        conservative = (
-            conservative_ladder[0]
-            if conservative_ladder and conservative_ladder[0].changed
-            else None)
+        force_native = config.safety.use_kicad_native_drc
+        skip_native = not config.safety.use_kicad_native_drc
+        conservative = next((
+            plan for plan in rank_candidate_plans(conservative_ladder)
+            if plan.changed and
+            plan_identity(plan) != plan_identity(global_plan)), None)
         decision = _maximize_safe_native_candidates(
             adapter, board, snapshot.model, snapshot.eligible_keys,
             planning_candidates, conservative_plan=conservative,
@@ -502,9 +496,9 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         if native.validation_mode == "geometric_removal_fast_path":
             report.append(
                 "Safety gate: proven removal-only geometry; native DRC not required.")
-        elif native.validation_mode == "single_track_drc_disabled":
+        elif native.validation_mode == "native_drc_disabled":
             report.append(
-                "Safety gate: single-track KiCad DRC disabled by internal policy.")
+                "Safety gate: KiCad native DRC disabled by session policy.")
         else:
             report.append("Native KiCad DRC gate: no category increase.")
         report.append("Chosen plan: remove {} segment(s), add {} segment(s).".format(
