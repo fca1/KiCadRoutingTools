@@ -41,6 +41,26 @@ def _is_better_plan(candidate, incumbent):
     return plan_identity(ranked[0]) == plan_identity(candidate)
 
 
+def _fixed_endpoint_only(plan):
+    """Identify a native-risk core without restricting geometric planning."""
+    return (bool(plan.transformations) and
+            all(item.mechanism == "fixed_endpoints"
+                for item in plan.transformations))
+
+
+def _compose_available(model, eligible_keys, plans):
+    """Greedily retain compatible plans in their existing quality order."""
+    accepted = []
+    for plan in plans:
+        try:
+            combine_plans(model, eligible_keys, accepted + [plan])
+        except ValueError:
+            continue
+        accepted.append(plan)
+    return (combine_plans(model, eligible_keys, accepted)
+            if accepted else None)
+
+
 def maximize_safe_native_candidates(
         adapter, board, model, eligible_keys, planning_candidates, *,
         conservative_plan, connection_plans, force_native, skip_native,
@@ -60,14 +80,39 @@ def maximize_safe_native_candidates(
         return decision
 
     primary = ranked[0]
+
+    # Establish a zero-DRC floor before spending the native budget. Exact
+    # copper-equivalent changes and the already supported strict-removal proof
+    # are composable and cannot be invalidated by a later risky candidate.
+    certificate = getattr(adapter, "native_plan_certificate", None)
+    if certificate is not None and not force_native and not skip_native:
+        certified = [plan for plan in connection_plans
+                     if certificate(board, plan) is not None]
+        certified_core = _compose_available(
+            model, eligible_keys, certified)
+        if (certified_core is not None and
+                certificate(board, certified_core) is not None):
+            certified_native = adapter.validate_plan(
+                board, certified_core, force_native=False,
+                skip_native=False, timeout_seconds=0.0,
+                wait_callback=wait_callback)
+            if certified_native.allowed:
+                decision.plan = certified_core
+                decision.native = certified_native
+
     initial = [primary]
     # Validate the three complementary levels in one native wave: global
     # optimum, whole-board conservative plan, and best independent connection.
     # KiCad's baseline DRC is shared, so this preserves both the historical
     # conservative success and a useful local result without another serial
     # baseline run.
-    local_anchor = next((plan for plan in rank_candidate_plans(connection_plans)
-                         if plan_identity(plan) != plan_identity(primary)), None)
+    fixed_core = _compose_available(
+        model, eligible_keys,
+        [plan for plan in rank_candidate_plans(connection_plans)
+         if _fixed_endpoint_only(plan)])
+    local_anchor = fixed_core or next((
+        plan for plan in rank_candidate_plans(connection_plans)
+        if plan_identity(plan) != plan_identity(primary)), None)
     conservative_identity = (
         plan_identity(conservative_plan)
         if conservative_plan is not None and conservative_plan.changed else

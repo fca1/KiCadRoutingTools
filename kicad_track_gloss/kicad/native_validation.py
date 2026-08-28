@@ -123,21 +123,27 @@ def _point_line_distance(point, a, b):
     return cross / squared ** 0.5
 
 
-def _addition_is_existing_copper(addition, removed, tolerance):
-    """Prove that the whole addition is covered by removed collinear copper."""
-    a, b = addition.start, addition.end
+def _item_endpoints(item):
+    if hasattr(item, "start"):
+        return item.start, item.end
+    return ((item.start_x, item.start_y),
+            (item.end_x, item.end_y))
+
+
+def _item_is_covered_by_copper(item, covering, tolerance):
+    """Prove that ``item`` is wholly covered by compatible collinear copper."""
+    a, b = _item_endpoints(item)
     dx, dy = b[0] - a[0], b[1] - a[1]
     squared = dx * dx + dy * dy
     if squared <= 1e-18:
         return False
     intervals = []
-    for segment in removed:
-        if (segment.net_id != addition.net_id or
-                segment.layer != addition.layer or
-                abs(segment.width - addition.width) > tolerance):
+    for segment in covering:
+        if (segment.net_id != item.net_id or
+                segment.layer != item.layer or
+                abs(segment.width - item.width) > tolerance):
             continue
-        start = (segment.start_x, segment.start_y)
-        end = (segment.end_x, segment.end_y)
+        start, end = _item_endpoints(segment)
         if (_point_line_distance(start, a, b) > tolerance or
                 _point_line_distance(end, a, b) > tolerance):
             continue
@@ -157,6 +163,43 @@ def _addition_is_existing_copper(addition, removed, tolerance):
     return False
 
 
+def _addition_is_existing_copper(addition, removed, tolerance):
+    """Backward-compatible name for the strict-removal geometric proof."""
+    return _item_is_covered_by_copper(addition, removed, tolerance)
+
+
+def _removed_segments(adapter, board, plan):
+    wanted = set(plan.remove_keys)
+    removed = []
+    try:
+        tracks = board.GetTracks()
+    except Exception:
+        return None
+    for item in tracks:
+        if _item_uuid(item) not in wanted:
+            continue
+        try:
+            removed.append(adapter.segment_from_item(item))
+        except Exception:
+            return None
+    return removed if len(removed) == len(wanted) else None
+
+
+def _is_exact_copper_equivalent_plan(adapter, board, plan):
+    """Prove bidirectional copper coverage, including on zoned boards."""
+    if not plan.remove_keys or not plan.additions:
+        return False
+    removed = _removed_segments(adapter, board, plan)
+    if removed is None:
+        return False
+    tolerance = 1.0 / adapter._iu_per_mm()
+    return (
+        all(_item_is_covered_by_copper(addition, removed, tolerance)
+            for addition in plan.additions) and
+        all(_item_is_covered_by_copper(segment, plan.additions, tolerance)
+            for segment in removed))
+
+
 def _is_strict_removal_only_plan(adapter, board, plan):
     """Return true only when the plan cannot add copper to new geometry.
 
@@ -166,20 +209,21 @@ def _is_strict_removal_only_plan(adapter, board, plan):
     """
     if _has_zones(board) or not plan.remove_keys or not plan.additions:
         return False
-    wanted = set(plan.remove_keys)
-    removed = []
-    for item in board.GetTracks():
-        if _item_uuid(item) not in wanted:
-            continue
-        try:
-            removed.append(adapter.segment_from_item(item))
-        except Exception:
-            return False
-    if len(removed) != len(wanted):
+    removed = _removed_segments(adapter, board, plan)
+    if removed is None:
         return False
     tolerance = 1.0 / adapter._iu_per_mm()
     return all(_addition_is_existing_copper(addition, removed, tolerance)
                for addition in plan.additions)
+
+
+def certify_native_plan(adapter, board, plan):
+    """Return a proof mode when native DRC cannot add safety information."""
+    if _is_exact_copper_equivalent_plan(adapter, board, plan):
+        return "geometric_equivalence_fast_path"
+    if _is_strict_removal_only_plan(adapter, board, plan):
+        return "geometric_removal_fast_path"
+    return None
 
 
 def _copy_project_files(source_board, target_board):
@@ -338,12 +382,13 @@ def validate_native_plan_ladder(adapter, board, plans, *, force_native=False,
     results = [None] * len(plans)
     native_indexes = []
     for index, plan in enumerate(plans):
-        if (not force_native and
-                _is_strict_removal_only_plan(adapter, board, plan)):
+        certificate = (None if force_native else
+                       certify_native_plan(adapter, board, plan))
+        if certificate is not None:
             elapsed = (time.monotonic() - started) * 1000.0
             results[index] = NativeDrcResult(
                 True, timings_ms={"total": elapsed},
-                validation_mode="geometric_removal_fast_path")
+                validation_mode=certificate)
             # A proven first candidate wins; lower-quality candidates do not
             # need speculative construction or validation.
             if index == 0:
