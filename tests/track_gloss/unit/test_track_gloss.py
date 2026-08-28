@@ -1,3 +1,4 @@
+import ast
 import math
 import random
 import sys
@@ -1189,6 +1190,22 @@ def test_plugin_version_matches_metadata():
     metadata = json.loads(
         Path("kicad_track_gloss/metadata.json").read_text(encoding="utf-8"))
     assert metadata["versions"][0]["version"] == __version__
+
+
+def test_plugin_replan_keyword_is_only_sent_to_salvage_generator():
+    source = (Path(__file__).parents[3] / "kicad_track_gloss" /
+              "action_plugin.py").read_text(encoding="utf-8")
+    calls = [node for node in ast.walk(ast.parse(source))
+             if isinstance(node, ast.Call) and
+             isinstance(node.func, ast.Name) and
+             node.func.id in {
+                 "generate_single_connection_alternatives",
+                 "generate_single_connection_salvage_plans"}]
+    assert calls
+    for call in calls:
+        if call.func.id == "generate_single_connection_alternatives":
+            assert "replan" not in {
+                keyword.arg for keyword in call.keywords}
 
 
 def test_repository_documentation_is_split_by_public_contract():

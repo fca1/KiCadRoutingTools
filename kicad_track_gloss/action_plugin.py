@@ -368,8 +368,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                     collect_statistics=diagnostic,
                     planning_deadline=planning_deadline,
                     cancellation_grace_seconds=(
-                        config.timing.interactive_cancellation_grace_seconds),
-                    replan=False),
+                        config.timing.interactive_cancellation_grace_seconds)),
                 wait_callback)
             planning_candidates.extend(local_candidates)
             single_connection_units = _run_api_neutral(
@@ -383,7 +382,8 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                     collect_statistics=diagnostic,
                     planning_deadline=planning_deadline,
                     cancellation_grace_seconds=(
-                        config.timing.interactive_cancellation_grace_seconds)),
+                        config.timing.interactive_cancellation_grace_seconds),
+                    replan=False),
                 wait_callback)
             connection_plans.extend(single_connection_units)
             timings["single_connection_portfolio"] = (
