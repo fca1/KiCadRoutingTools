@@ -19,8 +19,11 @@ from .validation import validate_result
 
 def plan_identity(plan):
     """Return a stable, front-end-neutral identity for a composed plan."""
+    def canonical_endpoints(addition):
+        return tuple(sorted((addition.start, addition.end)))
+
     additions = tuple(sorted((
-        addition.start, addition.end, round(addition.width, 6),
+        canonical_endpoints(addition), round(addition.width, 6),
         addition.layer, addition.net_id) for addition in plan.additions))
     return tuple(sorted(plan.remove_keys)), additions
 

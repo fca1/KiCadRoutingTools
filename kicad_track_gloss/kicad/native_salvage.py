@@ -61,6 +61,41 @@ def _compose_available(model, eligible_keys, plans):
             if accepted else None)
 
 
+def _plan_bounds(model, plan):
+    removed = set(plan.remove_keys)
+    points = []
+    padding = 0.0
+    for segment in model.segments:
+        if segment.uuid not in removed:
+            continue
+        points.extend(((segment.start_x, segment.start_y),
+                       (segment.end_x, segment.end_y)))
+        padding = max(padding, segment.width * 0.5,
+                      max(0.0, segment.clearance))
+    for addition in plan.additions:
+        points.extend((addition.start, addition.end))
+        padding = max(padding, addition.width * 0.5,
+                      max(0.0, addition.clearance))
+    if not points:
+        return None
+    return (min(point[0] for point in points) - padding,
+            min(point[1] for point in points) - padding,
+            max(point[0] for point in points) + padding,
+            max(point[1] for point in points) + padding)
+
+
+def _plans_near_findings(model, plans, points):
+    suspects = set()
+    for plan in plans:
+        bounds = _plan_bounds(model, plan)
+        if bounds is None:
+            continue
+        if any(bounds[0] <= x <= bounds[2] and
+               bounds[1] <= y <= bounds[3] for x, y in points):
+            suspects.add(plan_identity(plan))
+    return suspects
+
+
 def maximize_safe_native_candidates(
         adapter, board, model, eligible_keys, planning_candidates, *,
         conservative_plan, connection_plans, force_native, skip_native,
@@ -264,6 +299,8 @@ def maximize_safe_native_connections(
     attempts = 0
     deadline_reached = False
     chunks = []
+    rejected_identities = set()
+    suspects = set()
 
     def compose(plans):
         try:
@@ -279,9 +316,18 @@ def maximize_safe_native_connections(
         candidates = []
         meanings = []
         if accepted:
-            batch = compose(accepted + pending)
+            localized = [plan for plan in pending
+                         if plan_identity(plan) not in suspects]
+            batch = compose(accepted + localized) if localized else None
             if batch is not None:
                 candidates.append(batch)
+                meanings.append(("batch", tuple(localized)))
+            full_batch = compose(accepted + pending)
+            if (full_batch is not None and
+                    plan_identity(full_batch) not in rejected_identities and
+                    all(plan_identity(full_batch) != plan_identity(item)
+                        for item in candidates)):
+                candidates.append(full_batch)
                 meanings.append(("batch", tuple(pending)))
             if not chunks:
                 midpoint = max(1, len(pending) // 2)
@@ -295,14 +341,18 @@ def maximize_safe_native_connections(
                 chunk = chunks.pop(0)
                 incremental = compose(accepted + list(chunk))
                 if (incremental is not None and
+                        plan_identity(incremental) not in rejected_identities and
                         all(plan_identity(incremental) != plan_identity(item)
                             for item in candidates)):
                     candidates.append(incremental)
                     meanings.append(("chunk", chunk))
         else:
-            for plan in pending[:3]:
+            ordered_pending = sorted(
+                pending, key=lambda plan: plan_identity(plan) in suspects)
+            for plan in ordered_pending[:3]:
                 candidate = compose([plan])
-                if candidate is not None:
+                if (candidate is not None and
+                        plan_identity(candidate) not in rejected_identities):
                     candidates.append(candidate)
                     meanings.append(("one", plan))
         if not candidates:
@@ -343,6 +393,13 @@ def maximize_safe_native_connections(
                     pending.remove(plan)
             chunks = []
             continue
+
+        for candidate, result in zip(candidates, native_results):
+            if not result.allowed and not result.error:
+                rejected_identities.add(plan_identity(candidate))
+        finding_points = tuple(point for result in native_results
+                               for point in result.finding_points)
+        suspects = _plans_near_findings(model, pending, finding_points)
 
         tested_units = [(kind, payload) for kind, payload in meanings
                         if kind in ("one", "chunk")]

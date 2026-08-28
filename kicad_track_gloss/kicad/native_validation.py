@@ -18,12 +18,14 @@ import time
 
 if __package__:
     from .drc_report import (drc_increases as _drc_increases,
+                             json_report_evidence as _json_report_evidence,
                              json_report_summary as _json_report_summary)
 else:
     # The candidate-board helper deliberately executes this file directly in
     # KiCad's Python process.  Direct scripts have no package parent, but their
     # own directory is importable.  Keep that supported entry point explicit.
     from drc_report import (drc_increases as _drc_increases,
+                            json_report_evidence as _json_report_evidence,
                             json_report_summary as _json_report_summary)
 
 
@@ -37,6 +39,7 @@ class NativeDrcResult:
     timings_ms: dict = field(default_factory=dict)
     baseline_cached: bool = False
     validation_mode: str = "native_parallel"
+    finding_points: tuple = ()
 
 
 _CACHE_LIMIT = 8
@@ -83,6 +86,14 @@ def _state_digest(adapter, board_path):
 def _copy_summary(summary):
     counts, fingerprints = summary
     return Counter(counts), Counter(fingerprints)
+
+
+def _unpack_drc(value):
+    """Accept both native evidence triples and legacy test doubles."""
+    if len(value) == 3:
+        return value
+    counts, fingerprints = value
+    return counts, fingerprints, {}
 
 
 def _wait_for_future(future, remaining, wait_callback=None):
@@ -348,8 +359,9 @@ def _run_drc(adapter, board_path, report_path, timeout_seconds=None,
         raise RuntimeError(
             "native DRC failed (exit {}): {}".format(
                 returncode, detail))
-    return _json_report_summary(report_path.read_text(
-        encoding="utf-8", errors="replace"))
+    text = report_path.read_text(encoding="utf-8", errors="replace")
+    counts, fingerprints = _json_report_summary(text)
+    return counts, fingerprints, _json_report_evidence(text)
 
 
 def validate_native_plan_ladder(adapter, board, plans, *, force_native=False,
@@ -424,6 +436,7 @@ def validate_native_plan_ladder(adapter, board, plans, *, force_native=False,
                         allowed=cached.allowed,
                         before=dict(cached.before), after=dict(cached.after),
                         increases=dict(cached.increases), error=cached.error,
+                        finding_points=tuple(cached.finding_points),
                         timings_ms={
                             "snapshot": snapshot_ms,
                             "cache_lookup": elapsed,
@@ -493,9 +506,10 @@ def validate_native_plan_ladder(adapter, board, plans, *, force_native=False,
                 else:
                     before_value, before_ms, _label = _wait_for_future(
                         before_future, remaining, wait_callback)
-                    before, before_fingerprints = before_value
+                    before, before_fingerprints, _before_evidence = \
+                        _unpack_drc(before_value)
                     _cache_put(_baseline_cache, baseline_key,
-                               _copy_summary(before_value))
+                               (Counter(before), Counter(before_fingerprints)))
                 for index, _candidate_path, _plan_path, plan_key in pending:
                     timings = {
                         "snapshot": snapshot_ms,
@@ -507,17 +521,28 @@ def validate_native_plan_ladder(adapter, board, plans, *, force_native=False,
                             raise candidate_errors[index]
                         after_value, after_ms, _label = _wait_for_future(
                             after_futures[index], remaining, wait_callback)
-                        after, after_fingerprints = after_value
+                        (after, after_fingerprints,
+                         after_evidence) = _unpack_drc(after_value)
                         timings["after_drc"] = after_ms
                         timings["total"] = (
                             time.monotonic() - started) * 1000.0
                         increases = _drc_increases(
                             before, after,
                             before_fingerprints, after_fingerprints)
+                        new_fingerprints = after_fingerprints - before_fingerprints
+                        points = []
+                        for identity in new_fingerprints:
+                            if identity[0] != "unconnected_items":
+                                points.extend(after_evidence.get(identity, ()))
+                        if increases.get("unconnected_items"):
+                            for identity, positions in after_evidence.items():
+                                if identity[0] == "unconnected_items":
+                                    points.extend(positions)
                         result = NativeDrcResult(
                             allowed=not increases,
                             before=dict(before), after=dict(after),
                             increases=dict(increases), timings_ms=timings,
+                            finding_points=tuple(sorted(set(points))),
                             baseline_cached=baseline_cached,
                             validation_mode=(
                                 "native_portfolio" if len(plans) > 1 else

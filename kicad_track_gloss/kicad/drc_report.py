@@ -30,6 +30,25 @@ def json_report_summary(text):
     return counts, fingerprints
 
 
+def json_report_evidence(text):
+    """Map exact finding identities to the positions reported by KiCad."""
+    document = json.loads(text)
+    records = list(document.get("violations", ())) + list(
+        document.get("unconnected_items", ()))
+    evidence = {}
+    for record in records:
+        kind = record.get("type", "unknown")
+        points = []
+        for item in record.get("items", ()):
+            position = item.get("pos") or item.get("position") or {}
+            try:
+                points.append((float(position["x"]), float(position["y"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        evidence[(kind, _freeze(record))] = tuple(points)
+    return evidence
+
+
 def drc_increases(before, after, before_fingerprints, after_fingerprints):
     """Return new findings without treating ratsnest relocation as a fault.
 
@@ -49,4 +68,4 @@ def drc_increases(before, after, before_fingerprints, after_fingerprints):
     return increases
 
 
-__all__ = ("drc_increases", "json_report_summary")
+__all__ = ("drc_increases", "json_report_evidence", "json_report_summary")
