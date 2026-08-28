@@ -53,8 +53,8 @@ silently grade the wrong subset.
 
 - `--minimum-saved-length-mm MM` sets the minimum saving required for each
   length-only transformation. The shared plugin/CLI default is 0.2 mm. Angle
-  correction and permitted equal-length simplification keep their explicit
-  exceptions.
+  correction and every segment-count reduction which does not increase copper
+  length remain admissible independently of this threshold.
 - `--max-passes N` sets the hard changed-pass guard. The packaged CLI default
   is 16.
 - `--time-budget SECONDS` bounds total planning and DRC time. With a finite

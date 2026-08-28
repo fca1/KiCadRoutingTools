@@ -38,7 +38,6 @@ LOG = logging.getLogger("KiCadTrackGloss")
 # intentionally reachable only by invoking either action with no track seed.
 # Native KiCad DRC validation is intentionally retained as a safety gate and
 # can dominate response time even for a single selected connection.
-ALLOW_EQUAL_LENGTH_SIMPLIFICATION = True
 BUSY_CURSOR_DELAY_SECONDS = 3.0
 BUSY_CURSOR_POLL_SECONDS = 0.05
 
@@ -298,8 +297,6 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                         snapshot.model, snapshot.eligible_keys,
                         snapshot.connection_scopes, GlossResult(),
                         min_gain=config.gloss.minimum_saved_length_mm,
-                        allow_equal_length_simpler=(
-                            ALLOW_EQUAL_LENGTH_SIMPLIFICATION),
                         clearance=snapshot.minimum_clearance,
                         max_passes=None,
                         group_max_passes=(
@@ -339,8 +336,6 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                     group_max_passes=(
                         config.convergence.interactive_group_max_passes),
                     min_gain=config.gloss.minimum_saved_length_mm,
-                    allow_equal_length_simpler=(
-                        ALLOW_EQUAL_LENGTH_SIMPLIFICATION),
                     clearance=snapshot.minimum_clearance,
                     collect_statistics=diagnostic,
                     parallel=True,
@@ -364,8 +359,6 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 lambda: generate_single_connection_alternatives(
                     snapshot.model, snapshot.eligible_keys, global_plan,
                     min_gain=config.gloss.minimum_saved_length_mm,
-                    allow_equal_length_simpler=(
-                        ALLOW_EQUAL_LENGTH_SIMPLIFICATION),
                     clearance=snapshot.minimum_clearance,
                     group_max_passes=(
                         config.convergence.interactive_group_max_passes),

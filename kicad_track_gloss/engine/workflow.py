@@ -90,7 +90,7 @@ def combine_plans(model, eligible_keys, plans):
 
 def generate_connection_candidates(
         model, eligible_keys, connection_scopes, source_plan, *, min_gain,
-        allow_equal_length_simpler, clearance, max_passes, group_max_passes,
+        clearance, max_passes, group_max_passes,
         collect_statistics, planning_deadline, cancellation_grace_seconds):
     """Rebuild exact one-selection candidates for a larger selected scope.
 
@@ -132,7 +132,6 @@ def generate_connection_candidates(
                 batch_group_convergence=False,
                 group_max_passes=group_max_passes,
                 min_gain=min_gain,
-                allow_equal_length_simpler=allow_equal_length_simpler,
                 clearance=clearance,
                 collect_statistics=collect_statistics,
                 parallel=False, deadline=planning_deadline,
@@ -161,7 +160,7 @@ def generate_connection_candidates(
 
 def generate_single_connection_alternatives(
         model, eligible_keys, primary_plan, *, min_gain,
-        allow_equal_length_simpler, clearance, group_max_passes,
+        clearance, group_max_passes,
         collect_statistics, planning_deadline,
         cancellation_grace_seconds, maximum_candidates=3):
     """Return fully converged, electrically complementary local glosses.
@@ -215,7 +214,6 @@ def generate_single_connection_alternatives(
                 batch_group_convergence=False,
                 group_max_passes=group_max_passes,
                 min_gain=min_gain,
-                allow_equal_length_simpler=allow_equal_length_simpler,
                 clearance=clearance,
                 collect_statistics=collect_statistics,
                 parallel=False, deadline=planning_deadline,

@@ -8,7 +8,7 @@ in-memory session override and never writes the file.
 
 | JSON path | Default | Unit/range | Scope | Effect |
 |---|---:|---|---|---|
-| `gloss.minimum_saved_length_mm` | `0.2` | mm, non-negative | Plugin and CLI | Rejects a length-only change below this saving. Angle normalization and permitted equal-length simplification retain their own explicit rules. The CLI can override it with `--minimum-saved-length-mm`. |
+| `gloss.minimum_saved_length_mm` | `0.2` | mm, non-negative | Plugin and CLI | Rejects a length-only change below this saving. Angle normalization and every segment-count reduction which does not increase copper length remain admissible independently of this threshold. The CLI can override it with `--minimum-saved-length-mm`. |
 | `convergence.interactive_group_max_passes` | `2` | integer >= 1 | Plugin, internal | Maximum local passes per independent group. |
 | `convergence.cli_max_passes` | `16` | integer >= 1 | CLI | Default changed-pass convergence guard; overridden by `--max-passes`. |
 | `timing.interactive_total_time_budget_seconds` | `20.0` | seconds > 0 | Plugin, session-editable | Bounds the complete interactive operation, including native validation. Long operations display only KiCad's non-modal busy cursor after three cumulative seconds. |

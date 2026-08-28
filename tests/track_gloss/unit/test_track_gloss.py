@@ -218,7 +218,7 @@ def test_converged_plan_reaches_a_reported_fixed_point():
     segs = staircase()
     result = generate_converged_plan(
         BoardModel(segs), {segment_key(segment) for segment in segs},
-        min_gain=0.01, allow_equal_length_simpler=True, clearance=0.0)
+        min_gain=0.01, clearance=0.0)
     assert result.changed
     assert result.fixed_point
     assert result.convergence_passes >= 1
@@ -257,7 +257,7 @@ def test_convergence_observer_reports_monotone_states_and_fixed_point():
     states = []
     result = generate_converged_plan(
         BoardModel(segs), {segment_key(segment) for segment in segs},
-        min_gain=0.01, allow_equal_length_simpler=True, clearance=0.0,
+        min_gain=0.01, clearance=0.0,
         pass_observer=states.append)
     assert result.fixed_point
     assert states[0]["event"] == "initial"
@@ -344,16 +344,27 @@ def test_shortened_existing_copper_is_not_rejected_by_coarse_pad_circle():
         ((0, 0), (9.8, 0)), ((9.8, 0), (10, 0.2))]
 
 
-def test_equal_length_simplification_is_mode_gated():
+def test_non_lengthening_segment_reduction_is_unconditional():
     segs = [Segment(0, 0, 1, 0, 0.2, 0, 1, "a"),
             Segment(1, 0, 2, 0, 0.2, 0, 1, "b")]
     selected = {"a", "b"}
-    shorten = smooth_selected_chains(BoardModel(segs), selected,
-                                      allow_equal_length_simpler=False)
-    simplify = smooth_selected_chains(BoardModel(segs), selected,
-                                       allow_equal_length_simpler=True)
-    assert not shorten.changed
+    simplify = smooth_selected_chains(BoardModel(segs), selected)
     assert simplify.changed and len(simplify.additions) == 1
+
+
+def test_subthreshold_shorter_segment_reduction_dominates():
+    segs = [
+        Segment(0, 0, 0, 5, 0.2, 0, 1, "a"),
+        Segment(0, 5, 0.1, 5.1, 0.2, 0, 1, "jog"),
+        Segment(0.1, 5.1, -5, 10.2, 0.2, 0, 1, "b"),
+    ]
+    result = smooth_selected_chains(
+        BoardModel(segs), {segment.uuid for segment in segs},
+        min_gain=0.2, span_strategy="global", clearance=0.0)
+
+    assert result.changed
+    assert 0.0 < result.saved_mm < 0.2
+    assert len(result.additions) < len(segs)
 
 
 def test_long_collinear_chain_has_no_artificial_split_boundary():
@@ -365,7 +376,7 @@ def test_long_collinear_chain_has_no_artificial_split_boundary():
 
     result = smooth_selected_chains(
         BoardModel(segments), eligible,
-        allow_equal_length_simpler=True, span_strategy="farthest")
+        span_strategy="farthest")
 
     assert set(result.remove_keys) == eligible
     assert len(result.additions) == 1
@@ -707,7 +718,7 @@ def test_rp2350_uart_mixed_width_pad_route_is_jointly_glossed():
     result = generate_candidate_plans(
         BoardModel(selected, pad_regions=pads),
         {segment.uuid for segment in selected}, min_gain=0.01,
-        allow_equal_length_simpler=True, clearance=0.0)[0]
+        clearance=0.0)[0]
 
     assert result.saved_mm > 2.5
     assert result.angle_corrections == 1
@@ -740,7 +751,7 @@ def test_rp2350_vreg_lx_arbitrary_angle_becomes_octolinear():
     result = generate_candidate_plans(
         BoardModel(selected + [continuation], pad_regions=pads),
         {segment.uuid for segment in selected}, min_gain=0.01,
-        allow_equal_length_simpler=True, clearance=0.0)[0]
+        clearance=0.0)[0]
 
     assert result.saved_mm > 1.3
     assert result.angle_corrections == 1
@@ -1841,7 +1852,7 @@ def test_single_connection_portfolio_converges_three_terminal_policies():
 
     candidates = generate_single_connection_alternatives(
         model, eligible, primary, min_gain=0.01,
-        allow_equal_length_simpler=True, clearance=0.0,
+        clearance=0.0,
         group_max_passes=2, collect_statistics=True,
         planning_deadline=None, cancellation_grace_seconds=1.0)
 
@@ -1930,7 +1941,7 @@ def test_diagnostic_reports_the_foreign_net_blocking_a_shortcut():
         BoardModel(selected + [blocker],
                    net_clearances={8: 0.2, 11: 0.2}),
         {segment.uuid for segment in selected}, min_gain=0.01,
-        allow_equal_length_simpler=False, clearance=0.2)
+        clearance=0.2)
 
     assert result.changed
     assert result.saved_mm > 0.1
@@ -1965,7 +1976,7 @@ def test_refinement_prunes_a_wider_generated_tail_after_same_net_t():
     result = generate_candidate_plans(
         BoardModel(selected + [immutable_continuation], pad_regions=[pad]),
         {segment.uuid for segment in selected}, min_gain=0.01,
-        allow_equal_length_simpler=True, clearance=0.0)[0]
+        clearance=0.0)[0]
 
     assert result.changed
     assert "wide-tail" in result.remove_keys

@@ -67,7 +67,6 @@ def main():
     plan = generate_converged_plan(
         snapshot.model, eligible,
         min_gain=CONFIG.gloss.minimum_saved_length_mm,
-        allow_equal_length_simpler=True,
         clearance=snapshot.minimum_clearance)
 
     print("board:", args.board)
@@ -139,7 +138,6 @@ def sweep(board, adapter, snapshot, records, board_path, verify_apply, max_scope
             best = generate_converged_plan(
                 snapshot.model, eligible,
                 min_gain=CONFIG.gloss.minimum_saved_length_mm,
-                allow_equal_length_simpler=True,
                 clearance=snapshot.minimum_clearance)
             if not best.changed:
                 best = None

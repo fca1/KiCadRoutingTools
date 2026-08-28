@@ -197,7 +197,6 @@ def _segment_subdivision_regression(snapshot, eligible, reference_plan):
             print("segment subdivision:", label, flush=True)
             plan = generate_converged_plan(
                 model, variant_eligible, min_gain=0.01,
-                allow_equal_length_simpler=True,
                 clearance=snapshot.minimum_clearance, parallel=True)
         final_model, _final_eligible = _apply_to_model(
             model, variant_eligible, plan, 999)
@@ -232,7 +231,6 @@ def _all_selected_regression(board, adapter, snapshot, records):
 
     best = generate_converged_plan(
         snapshot.model, eligible, min_gain=0.01,
-        allow_equal_length_simpler=True,
         clearance=snapshot.minimum_clearance, parallel=True)
     print("all-selected result:", round(best.saved_mm, 6), "mm,",
           len(best.remove_keys), "removed,", len(best.additions), "added",
@@ -259,7 +257,6 @@ def _short_vcc_regression(board, adapter, snapshot, records):
         board, records, {SHORT_VCC_SEED}, [])
     best = generate_converged_plan(
         snapshot.model, eligible, min_gain=0.01,
-        allow_equal_length_simpler=True,
         clearance=snapshot.minimum_clearance, parallel=True)
     assert len(expanded) == 9
     assert not protected
@@ -278,7 +275,6 @@ def _pad_sliding_regression(board, adapter, snapshot, records):
         board, records, {PAD_SLIDING_SEED}, [])
     best = generate_converged_plan(
         snapshot.model, eligible, min_gain=0.01,
-        allow_equal_length_simpler=True,
         clearance=snapshot.minimum_clearance, parallel=True)
     assert len(expanded) == 1
     assert not protected
@@ -316,7 +312,6 @@ def _reported_clearance_regressions(board, adapter, snapshot, records):
         assert not protected
         plan = generate_converged_plan(
             snapshot.model, eligible, min_gain=0.01,
-            allow_equal_length_simpler=True,
             clearance=snapshot.minimum_clearance, parallel=True)
         assert round(plan.saved_mm, 6) == expected_saved
         assert len(plan.remove_keys) == expected_removed, (
@@ -392,7 +387,6 @@ def main():
     for index, (eligible, seed) in enumerate(scopes.items(), 1):
         best = generate_converged_plan(
             snapshot.model, set(eligible), min_gain=0.01,
-            allow_equal_length_simpler=True,
             clearance=snapshot.minimum_clearance, parallel=True)
         if best.changed:
             changed.append((seed, best))

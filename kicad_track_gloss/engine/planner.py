@@ -591,7 +591,7 @@ def _refine_plan(model, eligible, initial, planner_kwargs, max_passes=3):
 
 
 def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
-                           allow_equal_length_simpler=False, clearance=0.1,
+                           clearance=0.1,
                            equal_length_tolerance=None,
                            span_strategy="farthest", path_preference=0,
                            solution_rank=0,
@@ -760,9 +760,16 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                                 path, span, layer, net_id)
                             new_count = len(additions)
                             gain = old_len - new_len
-                            acceptable = angle_corrections > 0 or gain >= min_gain or (
-                                allow_equal_length_simpler and abs(gain) <= equal_length_tolerance
-                                and new_count < j - i)
+                            # A segment reduction with non-increasing length
+                            # strictly dominates the current geometry. This is
+                            # a gloss invariant, not a length-saving heuristic,
+                            # so ``min_gain`` must not suppress it.
+                            simplifies = (
+                                new_count < j - i and
+                                gain >= -equal_length_tolerance)
+                            acceptable = (
+                                angle_corrections > 0 or
+                                gain >= min_gain or simplifies)
                             if not acceptable:
                                 if collect_statistics:
                                     _increment(result.search_counts, "not_improving")
