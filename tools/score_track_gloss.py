@@ -323,7 +323,8 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
      version, config) = _bootstrap_engine()
     from kicad_track_gloss.engine import (
         compose_compatible_connection_plans, generate_connection_candidates,
-        generate_single_connection_alternatives, plan_identity,
+        generate_single_connection_alternatives,
+        generate_single_connection_salvage_plans, plan_identity,
         rank_candidate_plans)
     from kicad_track_gloss.engine.model import GlossResult
     from kicad_track_gloss.kicad.native_salvage import (
@@ -384,6 +385,7 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             raise ValueError("scope contains no eligible track after protection")
         conservative_ladder = []
         connection_plans = []
+        single_connection_units = []
         connection_plan = None
         # The first half of a bounded run produces both the broad plan and
         # independently validatable connections.  The second half belongs to
@@ -443,6 +445,17 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
                     config.timing.interactive_cancellation_grace_seconds)))
             timings_ms["planning_single_connection"] = (
                 time.monotonic() - stage_started) * 1000.0
+            single_connection_units = \
+                generate_single_connection_salvage_plans(
+                    initial.model, eligible, planning_candidates,
+                    min_gain=minimum_saved_length_mm,
+                    clearance=initial.minimum_clearance,
+                    group_max_passes=max_passes,
+                    collect_statistics=False,
+                    planning_deadline=planning_deadline,
+                    cancellation_grace_seconds=(
+                        config.timing.interactive_cancellation_grace_seconds))
+            connection_plans.extend(single_connection_units)
         planning_candidates = list(rank_candidate_plans(planning_candidates))
         best = planning_candidates[0]
         native = None
@@ -551,6 +564,7 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             "candidate_ladder_cached": fallback_plan_cached,
             "connection_salvage_used": connection_salvage_used,
             "connection_salvage_attempts": connection_salvage_attempts,
+            "single_connection_units": len(single_connection_units),
             "connections_retained": connections_retained,
             "connections_planned": connections_planned,
             "native_drc_gate": (

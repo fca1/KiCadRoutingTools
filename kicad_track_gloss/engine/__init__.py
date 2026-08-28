@@ -8,7 +8,9 @@ from .terminals import (find_pad_terminal_targets, find_track_terminal_targets,
 from .workflow import (combine_plans, compose_compatible_connection_plans,
                        generate_connection_candidates, plan_identity,
                        generate_single_connection_alternatives,
-                       plan_net_ids, rank_candidate_plans)
+                       generate_single_connection_salvage_plans,
+                       plan_net_ids, rank_candidate_plans,
+                       split_plan_components)
 
 __all__ = (
     "find_pad_terminal_targets",
@@ -19,11 +21,13 @@ __all__ = (
     "generate_candidate_plans",
     "generate_connection_candidates",
     "generate_single_connection_alternatives",
+    "generate_single_connection_salvage_plans",
     "generate_converged_plan",
     "PlanningCancelled",
     "plan_identity",
     "plan_net_ids",
     "rank_candidate_plans",
     "smooth_selected_chains",
+    "split_plan_components",
     "summarize_plan",
 )

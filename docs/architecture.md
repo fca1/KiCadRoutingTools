@@ -104,7 +104,11 @@ optimum, and ranks that composition alongside the global converged plan. A
 larger selection therefore cannot silently replace a better local result with
 a lower-quality plan.
 
-After a native DRC rejection, three connection-local candidates can be probed
+Within one connection, converged states are also split at unchanged-copper
+boundaries into independently applicable optimization units. Each unit is
+replanned from the original board before native validation, so one rejected
+thermal-sensitive rewrite cannot discard another safe translation on the same
+net. After a native DRC rejection, three local candidates can be probed
 concurrently until a safe base exists. The process count never truncates the
 candidate set. Later DRC waves
 validate the complete remaining batch and complementary partial extensions.

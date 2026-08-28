@@ -14,8 +14,10 @@ from kicad_track_gloss.engine import (combine_plans, find_track_terminal_vertice
                                       generate_candidate_plans,
                                       generate_converged_plan,
                                       generate_single_connection_alternatives,
+                                      generate_single_connection_salvage_plans,
                                       rank_candidate_plans,
-                                      smooth_selected_chains, summarize_plan)
+                                      smooth_selected_chains,
+                                      split_plan_components, summarize_plan)
 from kicad_track_gloss.engine.model import (AddedSegment, BoardModel,
                                             CircleObstacle, GlossResult,
                                             PadRegion, Segment, segment_key)
@@ -67,6 +69,41 @@ def test_disjoint_local_connection_plans_compose_monotonically():
         additions=[AddedSegment((0, 0), (2, 0), 0.2, 0, 1)],
         saved_mm=first.saved_mm)
     assert rank_candidate_plans([weaker_global, combined])[0] is combined
+
+
+def test_single_connection_plan_exposes_independent_drc_salvage_units():
+    segments = [
+        Segment(0, 0, 1, 1, 0.2, 0, 1, "lower-a"),
+        Segment(1, 1, 2, 0, 0.2, 0, 1, "lower-b"),
+        Segment(2, 0, 4, 0, 0.2, 0, 1, "unchanged"),
+        Segment(4, 0, 5, 1, 0.2, 0, 1, "upper-a"),
+        Segment(5, 1, 6, 0, 0.2, 0, 1, "upper-b"),
+    ]
+    model = BoardModel(segments)
+    full = GlossResult(
+        remove_keys=["lower-a", "lower-b", "upper-a", "upper-b"],
+        additions=[
+            AddedSegment((0, 0), (2, 0), 0.2, 0, 1),
+            AddedSegment((4, 0), (6, 0), 0.2, 0, 1),
+        ],
+        saved_mm=4 * math.sqrt(2) - 4,
+        convergence_passes=1, fixed_point=True)
+
+    components = split_plan_components(model, full)
+    units = generate_single_connection_salvage_plans(
+        model, {segment.uuid for segment in segments}, [full],
+        min_gain=0.2, clearance=0.0, group_max_passes=2,
+        collect_statistics=False, planning_deadline=None,
+        cancellation_grace_seconds=1.0)
+
+    assert {frozenset(component.remove_keys) for component in components} == {
+        frozenset(("lower-a", "lower-b")),
+        frozenset(("upper-a", "upper-b")),
+    }
+    assert {frozenset(unit.remove_keys) for unit in units} == {
+        frozenset(("lower-a", "lower-b")),
+        frozenset(("upper-a", "upper-b")),
+    }
 
 
 def _native_result(allowed, mode="native_parallel"):
