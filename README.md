@@ -18,6 +18,7 @@ is never saved automatically. One KiCad Undo reverts the operation.
 
 Documentation:
 
+- [Smart Octo next-release specification](docs/smart-octo.md)
 - [Real Spirit specification](docs/real-spirit.md)
 - [Architecture](docs/architecture.md)
 - [Plugin usage](docs/plugin-usage.md)
