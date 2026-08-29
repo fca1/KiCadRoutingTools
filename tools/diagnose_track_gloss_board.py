@@ -66,8 +66,7 @@ def main():
     pad_targets = find_pad_terminal_targets(snapshot.model, eligible)
     plan = generate_converged_plan(
         snapshot.model, eligible,
-        min_gain=CONFIG.gloss.minimum_saved_length_mm,
-        clearance=snapshot.minimum_clearance)
+        min_gain=CONFIG.gloss.minimum_saved_length_mm)
 
     print("board:", args.board)
     print("seeds:", args.uuid)
@@ -137,8 +136,7 @@ def sweep(board, adapter, snapshot, records, board_path, verify_apply, max_scope
         try:
             best = generate_converged_plan(
                 snapshot.model, eligible,
-                min_gain=CONFIG.gloss.minimum_saved_length_mm,
-                clearance=snapshot.minimum_clearance)
+                min_gain=CONFIG.gloss.minimum_saved_length_mm)
             if not best.changed:
                 best = None
             error = ""

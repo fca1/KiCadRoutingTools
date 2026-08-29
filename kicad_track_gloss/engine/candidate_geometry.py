@@ -17,10 +17,49 @@ from .pads import segment_hits_pad
 
 
 def effective_clearance(model, segment):
+    """Return KiCad's resolved item clearance or the netclass floor."""
     if segment.clearance >= 0.0:
         return max(model.minimum_clearance, segment.clearance)
     return max(model.minimum_clearance,
                model.net_clearances.get(segment.net_id, 0.0))
+
+
+def inflated_polyline_width(model, segment, clearance_floor=0.0):
+    """Width of the clearance-bearing polyline used against obstacles.
+
+    A routed track of copper width ``w`` is treated as a solid polyline of
+    width ``w + 2c``.  For a foreign copper object, ``c`` is promoted to the
+    larger resolved clearance of the two objects before their envelopes are
+    compared.
+    """
+    clearance = max(float(clearance_floor),
+                    effective_clearance(model, segment))
+    return segment.width + 2.0 * clearance
+
+
+def track_pair_required_distance(model, moving, foreign,
+                                 clearance_floor=0.0):
+    """Minimum centreline distance for two foreign-net tracks."""
+    clearance = max(float(clearance_floor),
+                    effective_clearance(model, moving),
+                    effective_clearance(model, foreign))
+    return (moving.width + foreign.width) / 2.0 + clearance
+
+
+def circular_obstacle_required_distance(
+        model, moving, obstacle, clearance_floor=0.0):
+    """Minimum distance from the moving centreline to a via-like centre."""
+    clearance = max(float(clearance_floor),
+                    effective_clearance(model, moving), obstacle.clearance)
+    return moving.width / 2.0 + clearance + obstacle.radius
+
+
+def pad_inflation_margin(model, moving, pad, clearance_floor=0.0):
+    """Minkowski margin applied around foreign pad copper."""
+    clearance = max(float(clearance_floor),
+                    effective_clearance(model, moving), pad.clearance)
+    return max(0.0, moving.width / 2.0 + clearance -
+               model.coordinate_quantum_mm)
 
 
 def copper_signature(start, end, width, layer, net_id):
@@ -160,6 +199,8 @@ def path_blocker(model, path, moving, replaced_keys, clearance, context=None,
                  immutable_cover_keys=()):
     context = context or PlannerContext(model)
     moving_clearance = max(clearance, effective_clearance(model, moving))
+    moving_envelope_radius = inflated_polyline_width(
+        model, moving, clearance) / 2.0
     replaced_segments = [context.segment_by_key[key] for key in replaced_keys
                          if key in context.segment_by_key]
 
@@ -192,9 +233,8 @@ def path_blocker(model, path, moving, replaced_keys, clearance, context=None,
                 continue
             if other.layer != moving.layer or other.net_id == moving.net_id:
                 continue
-            pair_clearance = max(
-                moving_clearance, effective_clearance(model, other))
-            required = pair_clearance + (moving.width + other.width) / 2.0
+            required = track_pair_required_distance(
+                model, moving, other, clearance)
             if segment_distance(a, b, (other.start_x, other.start_y),
                                 (other.end_x, other.end_y)) < required - 1e-6:
                 if _clearance_violation_is_preexisting(
@@ -209,8 +249,8 @@ def path_blocker(model, path, moving, replaced_keys, clearance, context=None,
                 continue
             if obstacle.layers and moving.layer not in obstacle.layers:
                 continue
-            required = max(moving_clearance, obstacle.clearance) + \
-                moving.width / 2.0 + obstacle.radius
+            required = circular_obstacle_required_distance(
+                model, moving, obstacle, clearance)
             if point_segment_distance(
                     (obstacle.x, obstacle.y), a, b) < required - 1e-6:
                 return obstacle.kind + "_clearance", obstacle.net_id
@@ -220,9 +260,8 @@ def path_blocker(model, path, moving, replaced_keys, clearance, context=None,
                 continue
             if pad.layers and moving.layer not in pad.layers:
                 continue
-            pad_clearance = max(moving_clearance, pad.clearance)
-            margin = max(0.0, pad_clearance + moving.width / 2.0 -
-                         model.coordinate_quantum_mm)
+            margin = pad_inflation_margin(
+                model, moving, pad, clearance)
             enclosing_radius = (pad.width * pad.width +
                                 pad.height * pad.height) ** 0.5 / 2.0
             if point_segment_distance((pad.x, pad.y), a, b) >= \
@@ -231,11 +270,11 @@ def path_blocker(model, path, moving, replaced_keys, clearance, context=None,
             if segment_hits_pad(pad, a, b, margin=margin):
                 return "pad_clearance", pad.net_id
         for keepout in context.nearby_keepouts(
-                a, b, clearance, moving.width):
+                a, b, moving_clearance, moving.width):
             if keepout.layers and moving.layer not in keepout.layers:
                 continue
             if path_hits_polygon(
                     a, b, list(keepout.points),
-                    clearance + moving.width / 2.0):
+                    moving_envelope_radius):
                 return keepout.kind, 0
     return None

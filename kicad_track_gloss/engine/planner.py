@@ -236,7 +236,7 @@ def _taut_chain_paths(model, points, chain, layer, net_id, *, context,
             for local in internal_segment_translation_paths(
                     path, index, synthetic[index:index + 3], model, context,
                     clearance, replaced, immutable_cover_keys,
-                    _check_deadline, deadline, cancel_check, 0.0):
+                    _check_deadline, deadline, cancel_check):
                 moves.append(
                     path[:index] + tuple(local) + path[index + 4:])
         return tuple(moves)
@@ -613,7 +613,7 @@ def _compose_refined_plan(original_model, original_eligible, final_model,
 
 
 def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
-                           clearance=0.1,
+                           clearance=None,
                            equal_length_tolerance=None,
                            collect_statistics=True, planner_context=None,
                            deadline=None, cancel_check=None):
@@ -624,6 +624,8 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
     Non-selected copper remains in incidence and obstacle calculations.
     """
     eligible = {str(key) for key in eligible_segment_keys}
+    if clearance is None:
+        clearance = model.minimum_clearance
     if equal_length_tolerance is None:
         equal_length_tolerance = model.coordinate_quantum_mm
     planner_context = (planner_context if planner_context is not None and

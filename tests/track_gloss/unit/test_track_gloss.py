@@ -2016,7 +2016,8 @@ def test_diagnostic_report_contains_human_and_machine_readable_statistics():
     summary, details, json_lines = split_diagnostic_report([
         "KiCad Track Gloss diagnostic", "Plugin version: 0.3.20",
         "KiCad version: 10.0.5", "Eligible net(s) (1): TEST",
-        "Optimization coordinates: exact copper geometry; active KiCad grid not used.",
+        "Optimization coordinates: exact centerlines with clearance-inflated "
+        "copper polylines; active KiCad grid not used.",
     ] + report)
     assert "Length saved: {:.6f} mm".format(plan.saved_mm) in "\n".join(summary)
     assert "Machine-readable JSON:" not in details
@@ -2230,3 +2231,34 @@ def test_kicad_resolved_track_rule_overrides_larger_netclass_fallback():
     assert _path_blocker(
         model, ((0, 0), (0, 10)), fallback_moving, set(), 0.12,
         PlannerContext(model)) == ("foreign_track_clearance", 7)
+
+
+def test_polyline_envelope_inflates_copper_with_effective_pair_clearance():
+    from kicad_track_gloss.engine.candidate_geometry import (
+        inflated_polyline_width, track_pair_required_distance)
+
+    moving = Segment(0, 0, 10, 0, 0.2, 0, 1, "moving", clearance=0.15)
+    foreign = Segment(0, 1, 10, 1, 0.4, 0, 2, "foreign",
+                      clearance=0.3)
+    model = BoardModel([moving, foreign], minimum_clearance=0.1)
+
+    assert inflated_polyline_width(model, moving) == pytest.approx(0.5)
+    assert track_pair_required_distance(
+        model, moving, foreign) == pytest.approx(0.6)
+
+
+def test_keepout_uses_the_net_effective_polyline_envelope():
+    from kicad_track_gloss.engine.candidate_geometry import path_blocker
+    from kicad_track_gloss.engine.context import PlannerContext
+    from kicad_track_gloss.engine.model import PolygonKeepout
+
+    original = Segment(0, -1, 10, -1, 0.2, 0, 1, "moving",
+                       clearance=0.5)
+    moving = Segment(0, 0, 10, 0, 0.2, 0, 1, "moving", clearance=0.5)
+    keepout = PolygonKeepout(
+        ((2, 0.4), (8, 0.4), (8, 1.0), (2, 1.0)), (0,))
+    model = BoardModel([original], keepouts=[keepout], minimum_clearance=0.1)
+
+    assert path_blocker(
+        model, ((0, 0), (10, 0)), moving, {"moving"}, 0.1,
+        PlannerContext(model)) == ("keepout", 0)

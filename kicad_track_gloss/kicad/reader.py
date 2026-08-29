@@ -17,8 +17,6 @@ class SelectionSnapshot:
     model: BoardModel
     eligible_keys: set
     warnings: list = field(default_factory=list)
-    minimum_clearance: float = 0.1
-    copper_edge_clearance: float = 0.0
     selection_seed_count: int = 0
     auto_expanded_count: int = 0
     native_protected_count: int = 0
@@ -176,7 +174,6 @@ def read_snapshot(adapter, board, require_selection=True):
                        net_clearances, minimum, edge, None,
                        pad_regions, exact_board_outline(adapter, board),
                        1.0 / adapter._iu_per_mm())
-    return SelectionSnapshot(model, eligible, sorted(set(warnings)), minimum, edge,
-                             len(seed_keys), expanded_count,
-                             len(selected_authorities) + len(protected_expanded),
-                             connection_scopes)
+    return SelectionSnapshot(
+        model, eligible, sorted(set(warnings)), len(seed_keys), expanded_count,
+        len(selected_authorities) + len(protected_expanded), connection_scopes)

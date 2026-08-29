@@ -211,7 +211,8 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         except Exception:
             pass
         report.append(
-            "Optimization coordinates: exact copper geometry; active KiCad grid not used.")
+            "Optimization coordinates: exact centerlines with clearance-inflated "
+            "copper polylines; active KiCad grid not used.")
         report.append(
             "Session policy: minimum saving {:.6f} mm; convergence to fixed "
             "point (group passes {}); KiCad native DRC {}; time budget {:.1f} s "
@@ -297,7 +298,6 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                         snapshot.model, snapshot.eligible_keys,
                         snapshot.connection_scopes, GlossResult(),
                         min_gain=config.gloss.minimum_saved_length_mm,
-                        clearance=snapshot.minimum_clearance,
                         max_passes=None,
                         group_max_passes=(
                             config.convergence.interactive_group_max_passes),
@@ -336,7 +336,6 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                     group_max_passes=(
                         config.convergence.interactive_group_max_passes),
                     min_gain=config.gloss.minimum_saved_length_mm,
-                    clearance=snapshot.minimum_clearance,
                     collect_statistics=diagnostic,
                     parallel=True,
                     deadline=planning_deadline,
@@ -410,7 +409,6 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
                 lambda: generate_plan_continuations(
                     snapshot.model, snapshot.eligible_keys, base,
                     min_gain=config.gloss.minimum_saved_length_mm,
-                    clearance=snapshot.minimum_clearance,
                     group_max_passes=(
                         config.convergence.interactive_group_max_passes),
                     collect_statistics=diagnostic,

@@ -114,6 +114,13 @@ last safe obstacle contact. The globally shortest safe contraction is applied
 and the same rule repeats to a quantized geometric fixed point. This is a
 post-route contraction, not a new route search.
 
+The contracted object is a clearance-bearing copper polyline rather than an
+infinitely thin centreline. For copper width `w` and effective clearance `c`,
+its obstacle envelope has width `w + 2c`. Track/track comparisons use the
+larger resolved clearance of both objects plus both copper half-widths. Vias
+and pads contribute their real copper geometry and resolved layer clearance;
+keepouts are tested against the same inflated polyline.
+
 One selected connection produces one canonical taut-string plan. The former
 matrix of ranked schedules, corridor-only replanning, endpoint-policy variants,
 and intra-connection salvage has been removed. When native DRC is enabled,

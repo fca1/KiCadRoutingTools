@@ -165,7 +165,7 @@ def combine_plans(model, eligible_keys, plans):
 
 def generate_connection_candidates(
         model, eligible_keys, connection_scopes, source_plan, *, min_gain,
-        clearance, max_passes, group_max_passes,
+        max_passes, group_max_passes,
         collect_statistics, planning_deadline, cancellation_grace_seconds):
     """Rebuild exact one-selection candidates for a larger selected scope.
 
@@ -207,7 +207,6 @@ def generate_connection_candidates(
                 batch_group_convergence=False,
                 group_max_passes=group_max_passes,
                 min_gain=min_gain,
-                clearance=clearance,
                 collect_statistics=collect_statistics,
                 parallel=False, deadline=planning_deadline,
                 cancellation_grace_seconds=cancellation_grace_seconds)
@@ -234,7 +233,7 @@ def generate_connection_candidates(
 
 
 def generate_plan_continuations(
-        model, eligible_keys, base_plan, *, min_gain, clearance,
+        model, eligible_keys, base_plan, *, min_gain,
         group_max_passes, collect_statistics, planning_deadline,
         cancellation_grace_seconds):
     """Return cumulative candidates continuing a native-approved partial plan."""
@@ -245,7 +244,7 @@ def generate_plan_continuations(
         current_model, current_eligible, max_passes=None,
         return_partial_on_limit=True, batch_group_convergence=False,
         group_max_passes=group_max_passes, min_gain=min_gain,
-        clearance=clearance, collect_statistics=collect_statistics,
+        collect_statistics=collect_statistics,
         parallel=False, deadline=planning_deadline,
         conservative_ladder=visited,
         cancellation_grace_seconds=cancellation_grace_seconds)

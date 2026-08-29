@@ -1,4 +1,4 @@
-"""Exact local gloss operators which preserve the routed corridor."""
+"""Exact contact primitives used by the taut-polyline contraction."""
 
 from __future__ import annotations
 
@@ -97,14 +97,8 @@ def _line_intersection(point_a, direction_a, point_b, direction_b):
 def internal_segment_translation_paths(
         points, i, span, model, context, clearance, replaced_keys,
         immutable_cover_keys, check_deadline, deadline=None,
-        cancel_check=None, minimum_gain=0.0):
-    """Return the useful states of a one-dimensional interior translation.
-
-    The farthest internally safe state maximizes copper saving.  The first
-    state satisfying the public minimum-gain contract is retained as a
-    distinct native-DRC fallback.  Unlike arbitrary fractional probes, both
-    states come from exact optimization constraints.
-    """
+        cancel_check=None):
+    """Return maximal safe states of a one-dimensional interior translation."""
     if len(span) != 3:
         return ()
     tolerance = model.coordinate_quantum_mm
@@ -227,30 +221,6 @@ def internal_segment_translation_paths(
             continue
         retain(target_path)
 
-        # Native KiCad validation also accounts for refilled-zone
-        # connectivity, which is deliberately outside the API-neutral copper
-        # gate.  Keep the least invasive qualifying translation so the native
-        # taut contraction can make progress when that wider authority rejects the
-        # geometric optimum.
-        required = max(float(minimum_gain), tolerance)
-        if old_length - new_length + tolerance < required:
-            continue
-        low, high = 0.0, target
-        for _ in range(64):
-            if abs(high - low) <= tolerance:
-                break
-            middle_offset = (low + high) / 2.0
-            middle_path = normalized_path(middle_offset)
-            if (middle_path is not None and
-                    old_length - path_length(middle_path) >= required):
-                high = middle_offset
-            else:
-                low = middle_offset
-        threshold_path = normalized_path(high)
-        if (threshold_path is not None and not blocked(high) and
-                old_length - path_length(threshold_path) >=
-                required - tolerance):
-            retain(threshold_path)
     return tuple(candidates)
 
 

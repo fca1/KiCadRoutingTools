@@ -62,6 +62,20 @@ The baseline and candidate preparation/DRC work is overlapped where safe. No
 
 ## Fast path and session switch
 
+Every candidate is first checked as a clearance-inflated polyline. A track of
+width `w` and effective clearance `c` occupies an obstacle envelope of width
+`w + 2c`. Against another track, the engine uses the larger of both resolved
+clearances and adds both copper half-widths. Pads, vias, keepouts and board
+edges are tested with their corresponding Minkowski margins. Ordinary
+clearance is therefore part of path construction instead of being discovered
+afterward by DRC.
+
+KiCad 10 SWIG exposes evaluated per-item/layer clearance through
+`GetOwnClearance()` and netclass values, but no public two-object rule evaluator.
+Conditional `.kicad_dru` rules depending on a specific pair, zone refill
+connectivity, thermals, and other global categories remain reasons to keep
+native DRC enabled when required.
+
 A native DRC may be skipped automatically only for a provable containment case:
 the board has no zones and every added segment lies wholly inside copper being
 removed. Ordinary corner cutting, endpoint relocation, pad sliding, and T
