@@ -100,8 +100,7 @@ def _plans_near_findings(model, plans, points):
 def maximize_safe_native_candidates(
         adapter, board, model, eligible_keys, planning_candidates, *,
         conservative_plan, connection_plans, force_native, skip_native,
-        operation_deadline, wait_callback, connection_plan_factory=None,
-        continuation_factory=None):
+        operation_deadline, wait_callback, continuation_factory=None):
     """Validate diverse candidates while never losing an approved incumbent.
 
     Pure geometric rank cannot predict native DRC validity.  The first wave
@@ -273,17 +272,6 @@ def maximize_safe_native_candidates(
                 if terminal_error is not None and decision.native is None:
                     decision.native = terminal_error
                 break
-
-    # Replanning every intra-connection region is useful only after native
-    # authority rejects the broad optimum. Keep accepted one-connection work
-    # fast by expanding those units lazily, while the operation deadline still
-    # bounds the deeper search.
-    if (connection_plan_factory is not None and
-            not decision.primary_native.allowed and
-            (operation_deadline is None or
-             time.monotonic() < operation_deadline)):
-        connection_plans = list(rank_candidate_plans(
-            tuple(connection_plans) + tuple(connection_plan_factory())))
 
     canonically_probed = set()
 

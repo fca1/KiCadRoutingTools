@@ -16,8 +16,6 @@ from .engine import (find_pad_terminal_targets, find_track_terminal_vertices,
                      compose_compatible_connection_plans,
                      generate_connection_candidates, generate_converged_plan,
                      generate_plan_continuations,
-                     generate_single_connection_alternatives,
-                     generate_single_connection_salvage_plans,
                      plan_identity, plan_net_ids, rank_candidate_plans,
                      summarize_plan)
 from .engine.model import GlossResult, segment_key
@@ -286,7 +284,6 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             config.timing.interactive_planning_time_budget_seconds)
         conservative_ladder = []
         connection_plans = []
-        single_connection_units = []
         connection_plan = None
         connection_planning_limit_reached = False
         connection_planning_deadline = planning_deadline
@@ -355,47 +352,11 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             planning_candidates.append(connection_plan)
         planning_candidates.extend(
             plan for plan in conservative_ladder if plan.changed)
-        if (len(snapshot.connection_scopes) == 1 and global_plan.changed and
-                time.monotonic() < planning_deadline):
-            stage_started = time.monotonic()
-            local_candidates = _run_api_neutral(
-                lambda: generate_single_connection_alternatives(
-                    snapshot.model, snapshot.eligible_keys, global_plan,
-                    min_gain=config.gloss.minimum_saved_length_mm,
-                    clearance=snapshot.minimum_clearance,
-                    group_max_passes=(
-                        config.convergence.interactive_group_max_passes),
-                    collect_statistics=diagnostic,
-                    planning_deadline=planning_deadline,
-                    cancellation_grace_seconds=(
-                        config.timing.interactive_cancellation_grace_seconds)),
-                wait_callback)
-            planning_candidates.extend(local_candidates)
-            single_connection_units = _run_api_neutral(
-                lambda: generate_single_connection_salvage_plans(
-                    snapshot.model, snapshot.eligible_keys,
-                    planning_candidates,
-                    min_gain=config.gloss.minimum_saved_length_mm,
-                    clearance=snapshot.minimum_clearance,
-                    group_max_passes=(
-                        config.convergence.interactive_group_max_passes),
-                    collect_statistics=diagnostic,
-                    planning_deadline=planning_deadline,
-                    cancellation_grace_seconds=(
-                        config.timing.interactive_cancellation_grace_seconds),
-                    replan=False),
-                wait_callback)
-            connection_plans.extend(single_connection_units)
-            timings["single_connection_portfolio"] = (
-                time.monotonic() - stage_started) * 1000.0
         planning_candidates = list(rank_candidate_plans(planning_candidates))
         if diagnostic and len(snapshot.connection_scopes) == 1:
             report.append(
                 "Single-connection converged candidates: {}.".format(
                     len(planning_candidates)))
-            report.append(
-                "Independent intra-connection units: {}.".format(
-                    len(single_connection_units)))
         best = planning_candidates[0]
         aggressive_plan = best
         report.append("Convergence passes: " + str(best.convergence_passes))
@@ -464,22 +425,6 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
             force_native=force_native, skip_native=skip_native,
             operation_deadline=operation_deadline,
             wait_callback=wait_callback,
-            connection_plan_factory=(
-                (lambda: _run_api_neutral(
-                    lambda: generate_single_connection_salvage_plans(
-                        snapshot.model, snapshot.eligible_keys,
-                        planning_candidates,
-                        min_gain=config.gloss.minimum_saved_length_mm,
-                        clearance=snapshot.minimum_clearance,
-                        group_max_passes=(
-                            config.convergence.interactive_group_max_passes),
-                        collect_statistics=diagnostic,
-                        planning_deadline=planning_deadline,
-                        cancellation_grace_seconds=(
-                            config.timing.interactive_cancellation_grace_seconds),
-                        replan=True),
-                    wait_callback))
-                if len(snapshot.connection_scopes) == 1 else None),
             continuation_factory=decision_continuation)
         best = decision.plan or best
         native = decision.native

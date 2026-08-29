@@ -77,17 +77,14 @@ The packaged default is enabled.
 For one selected connection, the canonical planner repeatedly pulls the whole
 existing path taut between its terminations. Octolinear chords remove obsolete
 support points and continuous contact moves slide remaining runs against
-inflated obstacles. It also retains restricted movable/fixed track and pad
-terminal domains as DRC fallbacks. Every exact state visited while converging
-is retained, so a native rejection of the geometric fixed point cannot erase
-an earlier safe pass.
-Three DRC processes are used concurrently, but three is a process width rather
-than a candidate cutoff; later waves continue while time remains. Every
-candidate passes the complete internal gate first.
+inflated obstacles. Endpoint movement at pads and same-net T junctions belongs
+to that same contraction. The former movable/fixed endpoint matrix and local
+corridor replanning are not separate fallback algorithms anymore. Every plan
+passes the complete internal gate first.
 
 If a taut state is rejected while a geometrically compatible relaxed state is
 approved, three interpolated octolinear states are validated between them.
-This moves toward the DRC boundary in one portfolio wave instead of repeating
+This moves toward the DRC boundary in one validation wave instead of repeating
 minimum-saving translations. Only the unrestricted connection solver may
 certify `fixed_point`; a fallback optimum is automatically resumed or reported
 as partial when the 20-second operation budget expires.

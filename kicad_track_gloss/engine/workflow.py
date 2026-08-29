@@ -9,12 +9,10 @@ from __future__ import annotations
 
 import time
 
-from .geometry import length, quantize_path, segments_intersect
+from .geometry import length, quantize_path
 from .model import AddedSegment, GlossResult, segment_key
 from .planner import (_apply_to_model, _compose_refined_plan,
                       generate_converged_plan)
-from .terminals import (find_pad_terminal_targets,
-                        find_track_terminal_targets)
 from .validation import validate_result
 
 
@@ -165,101 +163,6 @@ def combine_plans(model, eligible_keys, plans):
     return result
 
 
-def split_plan_components(model, plan):
-    """Return independently applicable connected regions of one edit plan.
-
-    Native DRC can reject one local rewrite while another rewrite from the
-    same electrical connection is safe.  A plan component contains every
-    removed and added segment joined by copper geometry on the same net and
-    layer.  Components are validated against their own removal scope, so an
-    apparently separate fragment which actually depends on another edit is
-    discarded rather than exposed to native salvage.
-    """
-    segment_by_key = {segment_key(segment): segment
-                      for segment in model.segments}
-    edits = []
-    for key in plan.remove_keys:
-        segment = segment_by_key.get(key)
-        if segment is None:
-            continue
-        edits.append(("remove", key,
-                      (segment.start_x, segment.start_y),
-                      (segment.end_x, segment.end_y),
-                      segment.net_id, segment.layer))
-    for index, addition in enumerate(plan.additions):
-        edits.append(("add", index, addition.start, addition.end,
-                      addition.net_id, addition.layer))
-    if not edits:
-        return ()
-
-    parent = list(range(len(edits)))
-
-    def find(index):
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def union(first, second):
-        first, second = find(first), find(second)
-        if first != second:
-            parent[second] = first
-
-    for first_index, first in enumerate(edits):
-        for second_index in range(first_index + 1, len(edits)):
-            second = edits[second_index]
-            if first[4:6] != second[4:6]:
-                continue
-            if segments_intersect(first[2], first[3], second[2], second[3]):
-                union(first_index, second_index)
-
-    grouped = {}
-    for index, edit in enumerate(edits):
-        grouped.setdefault(find(index), []).append(edit)
-
-    components = []
-    available_transformations = list(plan.transformations)
-    for edits_in_component in grouped.values():
-        remove_keys = sorted(
-            edit[1] for edit in edits_in_component if edit[0] == "remove")
-        addition_indexes = sorted(
-            edit[1] for edit in edits_in_component if edit[0] == "add")
-        if not remove_keys or not addition_indexes:
-            continue
-        additions = [plan.additions[index] for index in addition_indexes]
-        removed_mm = sum(length(
-            (segment_by_key[key].start_x, segment_by_key[key].start_y),
-            (segment_by_key[key].end_x, segment_by_key[key].end_y))
-            for key in remove_keys)
-        added_mm = sum(length(item.start, item.end) for item in additions)
-        component = GlossResult(
-            remove_keys=remove_keys, additions=additions,
-            saved_mm=max(0.0, removed_mm - added_mm),
-            chains_considered=1, chains_changed=1,
-            convergence_passes=plan.convergence_passes,
-            fixed_point=False)
-
-        # Statistics are not needed for safety, but retain an exact matching
-        # transformation when diagnostic collection supplied one.
-        for transformation in list(available_transformations):
-            if (transformation.net_id == edits_in_component[0][4] and
-                    transformation.layer == edits_in_component[0][5] and
-                    transformation.before_segments == len(remove_keys) and
-                    transformation.after_segments == len(additions) and
-                    abs(transformation.before_mm - removed_mm) <= 1e-6 and
-                    abs(transformation.after_mm - added_mm) <= 1e-6):
-                component.transformations.append(transformation)
-                available_transformations.remove(transformation)
-                break
-        try:
-            validate_result(model, set(remove_keys), component,
-                            check_connectivity=True)
-        except ValueError:
-            continue
-        components.append(component)
-    return rank_candidate_plans(components)
-
-
 def generate_connection_candidates(
         model, eligible_keys, connection_scopes, source_plan, *, min_gain,
         clearance, max_passes, group_max_passes,
@@ -330,152 +233,6 @@ def generate_connection_candidates(
     return plans, rejected, deadline_reached
 
 
-def generate_single_connection_alternatives(
-        model, eligible_keys, primary_plan, *, min_gain,
-        clearance, group_max_passes,
-        collect_statistics, planning_deadline,
-        cancellation_grace_seconds):
-    """Return complementary local glosses and exact visited states.
-
-    A single selected connection used to expose only the highest-ranked
-    geometry to native DRC.  If that geometry moved a sensitive terminal,
-    rejection ended the operation even when the same connection admitted a
-    safe segment translation. Build alternative basins by retaining the KiCad
-    track junctions, pad contacts, or both, and preserve exact intermediate
-    states of corridor convergence. These are explicit gloss domains, not
-    route-search heuristics.
-    """
-    candidates = []
-    seen = set()
-
-    def retain(plan):
-        if not plan.changed or plan_identity(plan) in seen:
-            return
-        seen.add(plan_identity(plan))
-        candidates.append(plan)
-
-    retain(primary_plan)
-    has_track_terminals = bool(find_track_terminal_targets(
-        model, set(eligible_keys)))
-    has_pad_terminals = bool(find_pad_terminal_targets(
-        model, set(eligible_keys)))
-    policies = [
-        # Interior translations and corner cuts form a complete,
-        # corridor-preserving domain.  Keep both its optimum and its next
-        # qualifying state independently of endpoint policy.
-        (0, False, False, True),
-        (1, False, False, True),
-    ]
-    # Electrical endpoint policies precede alternate schedules.  They are
-    # distinct optimization domains, not guesses about which geometry KiCad
-    # DRC might prefer.  Enumerate every applicable domain and let the shared
-    # ranker/native authority decide.
-    if has_track_terminals:
-        policies.append((0, False, True, False))
-    if has_pad_terminals:
-        policies.append((0, True, False, False))
-    if has_track_terminals or has_pad_terminals:
-        policies.append((0, False, False, False))
-    policies.extend(((1, True, True, False), (2, True, True, False)))
-    if has_track_terminals:
-        policies.extend(((1, False, True, False),
-                         (2, False, True, False)))
-    if has_pad_terminals:
-        policies.extend(((1, True, False, False),
-                         (2, True, False, False)))
-    if has_track_terminals or has_pad_terminals:
-        policies.extend(((1, False, False, False),
-                         (2, False, False, False)))
-    for (opening_solution_rank, allow_track_sliding,
-         allow_pad_sliding, preserve_routed_corridor) in policies:
-        if (planning_deadline is not None and
-                time.monotonic() >= planning_deadline):
-            break
-        try:
-            visited = [] if preserve_routed_corridor else None
-            plan = generate_converged_plan(
-                model, eligible_keys, max_passes=None,
-                return_partial_on_limit=True,
-                batch_group_convergence=False,
-                group_max_passes=group_max_passes,
-                min_gain=min_gain,
-                clearance=clearance,
-                collect_statistics=collect_statistics,
-                parallel=False, deadline=planning_deadline,
-                cancellation_grace_seconds=cancellation_grace_seconds,
-                conservative_ladder=visited,
-                opening_solution_rank=opening_solution_rank,
-                use_taut_string=False,
-                preserve_routed_corridor=preserve_routed_corridor,
-                allow_track_terminal_sliding=allow_track_sliding,
-                allow_pad_terminal_sliding=allow_pad_sliding)
-        except ValueError:
-            continue
-        retain(plan)
-        for visited_plan in visited or ():
-            retain(visited_plan)
-    return rank_candidate_plans(candidates)
-
-
-def generate_single_connection_salvage_plans(
-        model, eligible_keys, candidates, *, min_gain, clearance,
-        group_max_passes, collect_statistics, planning_deadline,
-        cancellation_grace_seconds, replan=True):
-    """Build independently validatable units inside one connection.
-
-    Candidate convergence states can contain several disconnected edit
-    regions separated by unchanged copper.  Split those regions, then rerun
-    each exact removal scope from the original model so endpoint sliding and
-    subsequent passes reach that unit's own optimum before native DRC.
-    """
-    units = []
-    seen = set()
-
-    def retain(plan):
-        identity = plan_identity(plan)
-        if not plan.changed or identity in seen:
-            return
-        seen.add(identity)
-        units.append(plan)
-
-    for candidate in candidates:
-        for component in split_plan_components(model, candidate):
-            retain(component)
-
-    if not replan:
-        return rank_candidate_plans(units)
-
-    scopes = sorted({frozenset(unit.remove_keys) for unit in units},
-                    key=lambda scope: (-len(scope), tuple(sorted(scope))))
-    for scope in scopes:
-        if (planning_deadline is not None and
-                time.monotonic() >= planning_deadline):
-            break
-        visited = []
-        try:
-            local = generate_converged_plan(
-                model, scope, max_passes=None,
-                return_partial_on_limit=True,
-                batch_group_convergence=False,
-                group_max_passes=group_max_passes,
-                min_gain=min_gain, clearance=clearance,
-                collect_statistics=collect_statistics,
-                parallel=False, deadline=planning_deadline,
-                conservative_ladder=visited,
-                cancellation_grace_seconds=cancellation_grace_seconds)
-        except ValueError:
-            continue
-        except RuntimeError:
-            if (planning_deadline is not None and
-                    time.monotonic() >= planning_deadline):
-                break
-            raise
-        retain(local)
-        for state in visited:
-            retain(state)
-    return rank_candidate_plans(units)
-
-
 def generate_plan_continuations(
         model, eligible_keys, base_plan, *, min_gain, clearance,
         group_max_passes, collect_statistics, planning_deadline,
@@ -496,22 +253,6 @@ def generate_plan_continuations(
         return ()
     local_candidates = [followup]
     local_candidates.extend(state for state in visited if state.changed)
-    local_candidates.extend(generate_single_connection_alternatives(
-        current_model, current_eligible, followup,
-        min_gain=min_gain, clearance=clearance,
-        group_max_passes=group_max_passes,
-        collect_statistics=collect_statistics,
-        planning_deadline=planning_deadline,
-        cancellation_grace_seconds=cancellation_grace_seconds))
-    local_candidates.extend(generate_single_connection_salvage_plans(
-        current_model, current_eligible, local_candidates,
-        min_gain=min_gain, clearance=clearance,
-        group_max_passes=group_max_passes,
-        collect_statistics=collect_statistics,
-        planning_deadline=planning_deadline,
-        cancellation_grace_seconds=cancellation_grace_seconds,
-        replan=True))
-    canonical_identity = plan_identity(followup)
 
     cumulative = []
     for candidate in rank_candidate_plans(local_candidates):
@@ -529,13 +270,7 @@ def generate_plan_continuations(
             continue
         combined.convergence_passes = (
             base_plan.convergence_passes + candidate.convergence_passes)
-        # Restricted endpoint policies and split salvage units can reach a
-        # fixed point only inside their own domain.  They remain resumable by
-        # the complete rubber-band solver; only its canonical follow-up may
-        # certify the whole connection.
-        combined.fixed_point = (
-            candidate.fixed_point and
-            plan_identity(candidate) == canonical_identity)
+        combined.fixed_point = candidate.fixed_point
         cumulative.append(combined)
     return rank_candidate_plans(cumulative)
 
@@ -570,7 +305,5 @@ def compose_compatible_connection_plans(model, eligible_keys, plans):
 __all__ = (
     "combine_plans", "compose_compatible_connection_plans",
     "generate_connection_candidates",
-    "generate_plan_continuations",
-    "generate_single_connection_alternatives",
-    "generate_single_connection_salvage_plans", "plan_identity",
-    "plan_net_ids", "rank_candidate_plans", "split_plan_components")
+    "generate_plan_continuations", "interpolate_plan_backoffs",
+    "plan_identity", "plan_net_ids", "rank_candidate_plans")

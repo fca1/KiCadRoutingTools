@@ -44,9 +44,9 @@ immutable.
 Run either Track Gloss action with no straight track selected to open the
 session settings dialog. The dialog title includes the plugin version.
 
-- **Use native KiCad DRC for a one-track selection** enables the strongest
-  single-connection safety gate. Disabling it makes ordinary one-track glosses
-  substantially more responsive, but removes that native before/after check.
+- **Use KiCad native DRC** enables the native before/after gate for every
+  selection, including multi-net selections. Disabling it makes ordinary
+  one-track glosses substantially more responsive, but removes that gate.
 - **Minimum saved length** rejects changes that save less than the configured
   amount. Its default is 0.2 mm and it is edited in 0.1 mm increments.
 - **Total time budget**, **planning time budget**, and **cancellation grace**

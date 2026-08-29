@@ -62,6 +62,8 @@ silently grade the wrong subset.
   available for native validation and connection-local recovery. The packaged
   CLI default is unlimited because it is intended for offline automation.
 - `--no-parallel` disables independent net/layer worker processes.
+- `--no-native-drc` skips KiCad native DRC, matching the disabled plugin safety
+  option. Internal geometry and connectivity validation remain active.
 - `--trace-passes` sends one `GLOSS_PASS_JSON=` record per convergence state to
   stderr, including the terminal fixed-point, limit, or timeout state.
 

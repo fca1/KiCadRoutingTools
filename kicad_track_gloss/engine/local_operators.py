@@ -230,7 +230,7 @@ def internal_segment_translation_paths(
         # Native KiCad validation also accounts for refilled-zone
         # connectivity, which is deliberately outside the API-neutral copper
         # gate.  Keep the least invasive qualifying translation so the native
-        # portfolio can make progress when that wider authority rejects the
+        # taut contraction can make progress when that wider authority rejects the
         # geometric optimum.
         required = max(float(minimum_gain), tolerance)
         if old_length - new_length + tolerance < required:

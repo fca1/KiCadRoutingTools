@@ -50,10 +50,10 @@ a valid substitute for already discovered safe work.
   disappear.
 - `engine/terminals.py`: sliding same-net T termination analysis.
 - `engine/pads.py`: pad copper containment and bounded contact candidates.
-- `engine/planner.py`: chain discovery, octolinear generation, scheduling,
-  alternative composition, and fixed-point convergence.
-- `engine/workflow.py`: shared plugin/CLI candidate domains and visited-state
-  ladder.
+- `engine/planner.py`: chain discovery, taut octolinear contraction,
+  deterministic scheduling, and fixed-point convergence.
+- `engine/workflow.py`: shared plugin/CLI convergence continuation and
+  multi-connection composition.
 - `engine/parallel.py`: deterministic worker orchestration with sequential
   fallback.
 - `engine/validation.py`: immutable pre-apply invariants and connectivity.
@@ -92,8 +92,8 @@ reduction, and a stable geometry signature. Independent parallel results are
 sorted before composition. Selection order, net order, file object order, and
 worker completion order must not affect the result.
 
-Every proper branch alternative is derived from the same electrical incidence;
-there is no track-count cutoff deciding whether a branch deserves gloss. The
+Every proper branch is derived from the same electrical incidence; there is
+no track-count cutoff deciding whether a branch deserves gloss. The
 planner uses one weighted interval scheduler, follows newly opened
 simplifications through one outer convergence loop, and composes changed
 passes against the original model so the live board receives one atomic edit
@@ -114,17 +114,13 @@ last safe obstacle contact. The globally shortest safe contraction is applied
 and the same rule repeats to a quantized geometric fixed point. This is a
 post-route contraction, not a new route search.
 
-Converged states are also split at unchanged-copper
-boundaries into independently applicable optimization units. Each unit is
-replanned from the original board before native validation, so one rejected
-thermal-sensitive rewrite cannot discard another safe translation on the same
-net. After a native DRC rejection, three local candidates can be probed
-concurrently until a safe base exists. The process count never truncates the
-candidate set. Later DRC waves
-validate the complete remaining batch and complementary partial extensions.
-Every accepted extension
-immediately becomes the retained result, so expiration returns useful work
-without treating a complete net as the smallest recoverable unit.
+One selected connection produces one canonical taut-string plan. The former
+matrix of ranked schedules, corridor-only replanning, endpoint-policy variants,
+and intra-connection salvage has been removed. When native DRC is enabled,
+KiCad accepts or rejects that canonical plan; disabling native DRC avoids all
+candidate-portfolio work. Multi-connection selections still retain independent
+connection plans so the external anytime contract can return approved work
+instead of a global no-op.
 
 When KiCad rejects the taut geometry but approves a less aggressive state
 with the same topology, the engine interpolates exact octolinear backoff

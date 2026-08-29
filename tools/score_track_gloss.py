@@ -91,6 +91,10 @@ def _parser():
         "--no-parallel", action="store_true",
         help="disable independent net/layer worker processes")
     parser.add_argument(
+        "--no-native-drc", action="store_true",
+        help=("skip KiCad native DRC validation, matching the disabled "
+              "plugin safety option"))
+    parser.add_argument(
         "--output", metavar="OUTPUT.kicad_pcb",
         help=("write the converged gloss result to a new board; omitted for "
               "read-only scoring and forbidden with --place-route-loop"))
@@ -317,16 +321,15 @@ def _save_output(pcbnew, board, input_path, output_path, force=False):
 
 def evaluate(board_path, project_path=None, parallel=True, output_path=None,
              force=False, max_passes=None, scopes=None, pass_observer=None,
-             time_budget_seconds=None, minimum_saved_length_mm=None):
+             time_budget_seconds=None, minimum_saved_length_mm=None,
+             use_native_drc=True):
     (pcbnew, BoardAdapter, generate_converged_plan, length, segment_key,
      protected_track_keys, is_straight_track,
      version, config) = _bootstrap_engine()
     from kicad_track_gloss.engine import (
         compose_compatible_connection_plans, generate_connection_candidates,
         generate_plan_continuations,
-        generate_single_connection_alternatives,
-        generate_single_connection_salvage_plans, plan_identity,
-        rank_candidate_plans)
+        plan_identity, rank_candidate_plans)
     from kicad_track_gloss.engine.model import GlossResult
     from kicad_track_gloss.kicad.native_salvage import (
         maximize_safe_native_candidates)
@@ -431,33 +434,6 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             planning_candidates.append(connection_plan)
         planning_candidates.extend(
             plan for plan in conservative_ladder if plan.changed)
-        if (len(connection_scopes) == 1 and global_plan.changed and
-                (planning_deadline is None or
-                 time.monotonic() < planning_deadline)):
-            stage_started = time.monotonic()
-            planning_candidates.extend(generate_single_connection_alternatives(
-                initial.model, eligible, global_plan,
-                min_gain=minimum_saved_length_mm,
-                clearance=initial.minimum_clearance,
-                group_max_passes=max_passes,
-                collect_statistics=False,
-                planning_deadline=planning_deadline,
-                cancellation_grace_seconds=(
-                    config.timing.interactive_cancellation_grace_seconds)))
-            timings_ms["planning_single_connection"] = (
-                time.monotonic() - stage_started) * 1000.0
-            single_connection_units = \
-                generate_single_connection_salvage_plans(
-                    initial.model, eligible, planning_candidates,
-                    min_gain=minimum_saved_length_mm,
-                    clearance=initial.minimum_clearance,
-                    group_max_passes=max_passes,
-                    collect_statistics=False,
-                    planning_deadline=planning_deadline,
-                    cancellation_grace_seconds=(
-                        config.timing.interactive_cancellation_grace_seconds),
-                    replan=False)
-            connection_plans.extend(single_connection_units)
         planning_candidates = list(rank_candidate_plans(planning_candidates))
         best = planning_candidates[0]
         native = None
@@ -479,21 +455,9 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
                 adapter, board, initial.model, eligible,
                 planning_candidates, conservative_plan=conservative,
                 connection_plans=connection_plans,
-                force_native=False, skip_native=False,
+                force_native=False, skip_native=not use_native_drc,
                 operation_deadline=operation_deadline,
                 wait_callback=None,
-                connection_plan_factory=(
-                    (lambda: generate_single_connection_salvage_plans(
-                        initial.model, eligible, planning_candidates,
-                        min_gain=minimum_saved_length_mm,
-                        clearance=initial.minimum_clearance,
-                        group_max_passes=max_passes,
-                        collect_statistics=False,
-                        planning_deadline=planning_deadline,
-                        cancellation_grace_seconds=(
-                            config.timing.interactive_cancellation_grace_seconds),
-                        replan=True))
-                    if len(connection_scopes) == 1 else None),
                 continuation_factory=(
                     (lambda base: generate_plan_continuations(
                         initial.model, eligible, base,
@@ -647,7 +611,8 @@ def main(argv=None):
             output_path=args.output, force=args.force, scopes=scopes,
             max_passes=args.max_passes, pass_observer=pass_observer,
             time_budget_seconds=args.time_budget,
-            minimum_saved_length_mm=args.minimum_saved_length_mm)
+            minimum_saved_length_mm=args.minimum_saved_length_mm,
+            use_native_drc=not args.no_native_drc)
         if placed is not None:
             payload["placed_board"] = str(placed.resolve())
             payload["route_json"] = str(route_json.resolve())

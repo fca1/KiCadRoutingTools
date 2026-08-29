@@ -118,6 +118,12 @@ def test_cli_exposes_convergence_pass_limit_and_trace():
     assert args.trace_passes
 
 
+def test_cli_can_disable_native_drc_explicitly():
+    args = CLI._parser().parse_args([
+        "--no-native-drc", "candidate.kicad_pcb"])
+    assert args.no_native_drc
+
+
 def test_cli_exposes_json_output_path():
     args = CLI._parser().parse_args([
         "--json-out", "result.json", "candidate.kicad_pcb"])

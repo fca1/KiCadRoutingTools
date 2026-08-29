@@ -1,4 +1,3 @@
-import ast
 import math
 import random
 import sys
@@ -14,12 +13,10 @@ import pytest
 from kicad_track_gloss.engine import (combine_plans, find_track_terminal_vertices,
                                       generate_candidate_plans,
                                       generate_converged_plan,
-                                      generate_single_connection_alternatives,
-                                      generate_single_connection_salvage_plans,
                                       interpolate_plan_backoffs,
                                       rank_candidate_plans,
                                       smooth_selected_chains,
-                                      split_plan_components, summarize_plan)
+                                      summarize_plan)
 from kicad_track_gloss.engine.model import (AddedSegment, BoardModel,
                                             CircleObstacle, GlossResult,
                                             PadRegion, Segment, segment_key)
@@ -125,41 +122,6 @@ def test_disjoint_local_connection_plans_compose_monotonically():
         additions=[AddedSegment((0, 0), (2, 0), 0.2, 0, 1)],
         saved_mm=first.saved_mm)
     assert rank_candidate_plans([weaker_global, combined])[0] is combined
-
-
-def test_single_connection_plan_exposes_independent_drc_salvage_units():
-    segments = [
-        Segment(0, 0, 1, 1, 0.2, 0, 1, "lower-a"),
-        Segment(1, 1, 2, 0, 0.2, 0, 1, "lower-b"),
-        Segment(2, 0, 4, 0, 0.2, 0, 1, "unchanged"),
-        Segment(4, 0, 5, 1, 0.2, 0, 1, "upper-a"),
-        Segment(5, 1, 6, 0, 0.2, 0, 1, "upper-b"),
-    ]
-    model = BoardModel(segments)
-    full = GlossResult(
-        remove_keys=["lower-a", "lower-b", "upper-a", "upper-b"],
-        additions=[
-            AddedSegment((0, 0), (2, 0), 0.2, 0, 1),
-            AddedSegment((4, 0), (6, 0), 0.2, 0, 1),
-        ],
-        saved_mm=4 * math.sqrt(2) - 4,
-        convergence_passes=1, fixed_point=True)
-
-    components = split_plan_components(model, full)
-    units = generate_single_connection_salvage_plans(
-        model, {segment.uuid for segment in segments}, [full],
-        min_gain=0.2, clearance=0.0, group_max_passes=2,
-        collect_statistics=False, planning_deadline=None,
-        cancellation_grace_seconds=1.0)
-
-    assert {frozenset(component.remove_keys) for component in components} == {
-        frozenset(("lower-a", "lower-b")),
-        frozenset(("upper-a", "upper-b")),
-    }
-    assert {frozenset(unit.remove_keys) for unit in units} == {
-        frozenset(("lower-a", "lower-b")),
-        frozenset(("upper-a", "upper-b")),
-    }
 
 
 def _native_result(allowed, mode="native_parallel"):
@@ -1192,20 +1154,11 @@ def test_plugin_version_matches_metadata():
     assert metadata["versions"][0]["version"] == __version__
 
 
-def test_plugin_replan_keyword_is_only_sent_to_salvage_generator():
+def test_plugin_uses_only_the_canonical_single_connection_planner():
     source = (Path(__file__).parents[3] / "kicad_track_gloss" /
               "action_plugin.py").read_text(encoding="utf-8")
-    calls = [node for node in ast.walk(ast.parse(source))
-             if isinstance(node, ast.Call) and
-             isinstance(node.func, ast.Name) and
-             node.func.id in {
-                 "generate_single_connection_alternatives",
-                 "generate_single_connection_salvage_plans"}]
-    assert calls
-    for call in calls:
-        if call.func.id == "generate_single_connection_alternatives":
-            assert "replan" not in {
-                keyword.arg for keyword in call.keywords}
+    assert "generate_single_connection_alternatives" not in source
+    assert "generate_single_connection_salvage_plans" not in source
 
 
 def test_repository_documentation_is_split_by_public_contract():
@@ -1844,7 +1797,7 @@ def test_internal_corner_is_partially_chamfered_before_a_blocker():
         "corner_chamfer"]
 
 
-def test_internal_segment_translates_to_last_safe_position_before_obstacle():
+def test_taut_connection_stops_at_last_safe_position_before_obstacle():
     # The globally shortest A->D diagonal crosses the foreign obstacle.  A
     # pure gloss can still slide the internal vertical, retaining the two
     # outer supporting lines and stopping at the clearance boundary.
@@ -1859,14 +1812,18 @@ def test_internal_segment_translates_to_last_safe_position_before_obstacle():
 
     result = smooth_selected_chains(
         model, {"a", "middle", "c"}, min_gain=0.01,
-        clearance=0.1, solution_rank=1)
+        clearance=0.1)
 
     assert result.changed
     assert result.saved_mm > 0.1
-    verticals = [item for item in result.additions
-                 if abs(item.start[0] - item.end[0]) < 1e-8]
-    assert verticals
-    assert 2.0 < verticals[0].start[0] < 5.0
+    assert result.additions[0].start == (0.0, 0.0)
+    assert result.additions[-1].end == (6.0, 6.0)
+    assert all(
+        abs(abs(item.end[0] - item.start[0]) -
+            abs(item.end[1] - item.start[1])) < 1e-6 or
+        abs(item.end[0] - item.start[0]) < 1e-6 or
+        abs(item.end[1] - item.start[1]) < 1e-6
+        for item in result.additions)
 
 
 def test_connection_between_two_through_tracks_glosses_between_terminations():
@@ -1989,7 +1946,7 @@ def test_one_segment_can_shorten_between_two_pad_copper_areas():
     assert summary["mechanisms"][0]["key"] == "pad_slide"
 
 
-def test_single_connection_portfolio_covers_terminal_and_corridor_domains():
+def test_single_connection_canonical_plan_combines_terminal_and_corridor_motion():
     selected = [
         Segment(0, 0, 2, 0, 0.2, 0, 1, "s0"),
         Segment(2, 0, 3, 1, 0.2, 0, 1, "s1"),
@@ -1999,27 +1956,14 @@ def test_single_connection_portfolio_covers_terminal_and_corridor_domains():
     pad = PadRegion(0, 0, 1, 1, 0, "rect", 0, 1, (0,))
     model = BoardModel(selected + [through], pad_regions=[pad])
     eligible = {"s0", "s1", "s2"}
-    primary = generate_converged_plan(
+    result = generate_converged_plan(
         model, eligible, max_passes=None, return_partial_on_limit=True,
         group_max_passes=2, min_gain=0.01, clearance=0.0)
 
-    candidates = generate_single_connection_alternatives(
-        model, eligible, primary, min_gain=0.01,
-        clearance=0.0,
-        group_max_passes=2, collect_statistics=True,
-        planning_deadline=None, cancellation_grace_seconds=1.0)
-
-    assert len(candidates) >= 3
-    assert any(candidate.fixed_point for candidate in candidates)
-    assert any(all(item.mechanism == "fixed_endpoints"
-                   for item in candidate.transformations)
-               for candidate in candidates)
-    assert any(any(item.mechanism in ("track_slide", "pad_slide")
-                   for item in candidate.transformations)
-               for candidate in candidates)
-    assert len({tuple((item.start, item.end)
-                      for item in candidate.additions)
-                for candidate in candidates}) == len(candidates)
+    assert result.changed
+    assert result.fixed_point
+    assert any(item.mechanism in ("track_slide", "pad_slide")
+               for item in result.transformations)
 
 
 def test_diagnostic_collection_does_not_change_the_edit_plan():

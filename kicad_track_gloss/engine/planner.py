@@ -615,11 +615,6 @@ def _compose_refined_plan(original_model, original_eligible, final_model,
 def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                            clearance=0.1,
                            equal_length_tolerance=None,
-                           solution_rank=0,
-                           preserve_routed_corridor=False,
-                           allow_track_terminal_sliding=True,
-                           allow_pad_terminal_sliding=True,
-                           use_taut_string=True,
                            collect_statistics=True, planner_context=None,
                            deadline=None, cancel_check=None):
     """Return an immutable edit plan; never mutates ``model``.
@@ -712,15 +707,15 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                 cumulative = [0.0]
                 for a, b in zip(points, points[1:]):
                     cumulative.append(cumulative[-1] + length(a, b))
-                # The rubber-band fixed point is the canonical gloss. Ranked
-                # portfolio variants deliberately keep the older local search
-                # domains as independent, cheaper native-DRC fallbacks.
-                taut_paths = (_taut_chain_paths(
+                # The rubber-band fixed point is the canonical gloss.  Its
+                # visited states provide the only contraction candidates;
+                # endpoint motion and internal contacts are part of the same
+                # physical model rather than competing planning modes.
+                taut_paths = _taut_chain_paths(
                     model, points, chain, layer, net_id,
                     context=planner_context, clearance=clearance,
                     immutable_cover_keys=immutable_cover_keys,
                     deadline=deadline, cancel_check=cancel_check)
-                    if use_taut_string and int(solution_rank) == 0 else ())
 
                 def choices_at(i):
                     _check_deadline(deadline, cancel_check)
@@ -736,58 +731,39 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                         end_terminal = (net_id, layer, vertex(*points[j]))
                         start_targets = (
                             track_terminal_targets.get(start_terminal, ())
-                            if allow_track_terminal_sliding and i == 0 else ())
+                            if i == 0 else ())
                         end_targets = (
                             track_terminal_targets.get(end_terminal, ())
-                            if allow_track_terminal_sliding and
-                            j == len(chain) else ())
+                            if j == len(chain) else ())
                         start_pads = (
                             pad_terminal_targets.get(start_terminal, ())
-                            if allow_pad_terminal_sliding and i == 0 else ())
+                            if i == 0 else ())
                         end_pads = (
                             pad_terminal_targets.get(end_terminal, ())
-                            if allow_pad_terminal_sliding and
-                            j == len(chain) else ())
+                            if j == len(chain) else ())
                         if (j == i + 1 and not angle_corrections and not
                                 (start_targets or end_targets or
                                  start_pads or end_pads)):
                             continue
                         paths = []
-                        if not preserve_routed_corridor:
-                            for candidate_start, candidate_end in movable_endpoint_pairs(
-                                    points[i], points[j], start_targets, end_targets,
-                                    start_pads, end_pads):
-                                if length(candidate_start, candidate_end) <= 1e-9:
-                                    continue
-                                for path in octolinear_paths(
-                                        candidate_start, candidate_end):
-                                    if path not in paths:
-                                        paths.append(path)
-                            for path in _custom_pad_event_paths(
-                                    points, i, j, span, planner_context,
-                                    clearance):
+                        for candidate_start, candidate_end in movable_endpoint_pairs(
+                                points[i], points[j], start_targets, end_targets,
+                                start_pads, end_pads):
+                            if length(candidate_start, candidate_end) <= 1e-9:
+                                continue
+                            for path in octolinear_paths(
+                                    candidate_start, candidate_end):
                                 if path not in paths:
                                     paths.append(path)
+                        for path in _custom_pad_event_paths(
+                                points, i, j, span, planner_context,
+                                clearance):
+                            if path not in paths:
+                                paths.append(path)
                         if i == 0 and j == len(chain):
                             for path in taut_paths:
                                 if path not in paths:
                                     paths.append(path)
-                        if j == i + 2:
-                            chamfer = maximal_corner_chamfer_path(
-                                points, i, span, model, planner_context,
-                                clearance, replaced, immutable_cover_keys,
-                                _check_deadline, _is_octolinear, deadline,
-                                cancel_check)
-                            if chamfer is not None and chamfer not in paths:
-                                paths.append(chamfer)
-                        if j == i + 3:
-                            for translated in internal_segment_translation_paths(
-                                    points, i, span, model, planner_context,
-                                    clearance, replaced, immutable_cover_keys,
-                                    _check_deadline, deadline, cancel_check,
-                                    min_gain):
-                                if translated not in paths:
-                                    paths.append(translated)
                         for path in paths:
                             _check_deadline(deadline, cancel_check)
                             path = quantize_path(
@@ -862,7 +838,6 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                 # complete chain objective.  The removed greedy modes could
                 # produce a different gloss solely from search order.
                 options = {i: choices_at(i) for i in range(len(chain))}
-                retained_solutions = max(1, int(solution_rank) + 1)
                 best = {len(chain): [(0, 0.0, 0, [])]}
                 for i in range(len(chain) - 1, -1, -1):
                     candidates_dp = list(best.get(
@@ -894,11 +869,8 @@ def smooth_selected_chains(model, eligible_segment_keys, *, min_gain=0.01,
                         if (previous is None or
                                 dp_key(candidate) > dp_key(previous)):
                             unique_dp[signature] = candidate
-                    best[i] = sorted(
-                        unique_dp.values(), key=dp_key, reverse=True
-                    )[:retained_solutions]
-                selected_solution = best[0][min(
-                    max(0, int(solution_rank)), len(best[0]) - 1)]
+                    best[i] = [max(unique_dp.values(), key=dp_key)]
+                selected_solution = best[0][0]
                 spans = {start: selected
                          for start, selected in selected_solution[3]}
                 if not spans:
@@ -1609,8 +1581,6 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
     if max_passes is not None and max_passes < 1:
         raise ValueError("max_passes must be at least one")
     deadline = kwargs.get("deadline")
-    opening_solution_rank = max(
-        0, int(kwargs.pop("opening_solution_rank", 0)))
     cancel_check = kwargs.get("cancel_check")
     _check_deadline(deadline, cancel_check)
     source_model = _canonicalize_model_segments(model)
@@ -1664,8 +1634,6 @@ def generate_converged_plan(model, eligible_segment_keys, *, max_passes=16,
             raise ValueError("Gloss convergence entered a geometry cycle")
         seen.add(signature)
         pass_kwargs = dict(kwargs)
-        pass_kwargs["solution_rank"] = (
-            opening_solution_rank if pass_index == 0 else 0)
         if batch_group_convergence and "converge_groups" not in pass_kwargs:
             # Preserve the established first-pass basin. Once that broad
             # global edit has opened local simplifications, converge each
