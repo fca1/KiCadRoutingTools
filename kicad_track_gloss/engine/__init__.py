@@ -1,8 +1,8 @@
-"""KiCad-independent Real Spirit gloss engine."""
+"""KiCad-independent Smart Octo gloss engine."""
 
-from .real_spirit import (PlanningDeadlineExceeded, build_topology,
-                          extract_chains, localized_drc_remainder,
-                          plan_selected_copper)
+from .smart_octo import (PlanningDeadlineExceeded, build_topology,
+                         extract_chains, localized_drc_remainder,
+                         plan_selected_copper)
 from .statistics import summarize_plan
 
 __all__ = (

@@ -262,7 +262,7 @@ def _bootstrap_engine():
     package = types.ModuleType("kicad_track_gloss")
     package.__path__ = [str(ROOT / "kicad_track_gloss")]
     sys.modules["kicad_track_gloss"] = package
-    from kicad_track_gloss.engine.real_spirit import plan_selected_copper
+    from kicad_track_gloss.engine.smart_octo import plan_selected_copper
     from kicad_track_gloss.configuration import CONFIG
     from kicad_track_gloss.engine.geometry import length
     from kicad_track_gloss.engine.model import segment_key
@@ -303,7 +303,7 @@ def evaluate(board_path, project_path=None, output_path=None,
      version, config) = _bootstrap_engine()
     from kicad_track_gloss.kicad.native_validation import (
         NativeDrcResult, start_native_baseline_warmup)
-    from kicad_track_gloss.engine.real_spirit import localized_drc_remainder
+    from kicad_track_gloss.engine.smart_octo import localized_drc_remainder
     if time_budget_seconds is None:
         time_budget_seconds = config.timing.cli_total_time_budget_seconds
     if minimum_saved_length_mm is None:
@@ -327,7 +327,7 @@ def evaluate(board_path, project_path=None, output_path=None,
         0.0 if time_budget_seconds is None else
         min(0.5, float(time_budget_seconds) * 0.05)
         if not use_native_drc else
-        min(20.0, float(time_budget_seconds) * 0.40))
+        min(15.0, float(time_budget_seconds) * 0.25))
     planning_deadline = (None if operation_deadline is None else
                          operation_deadline - validation_reserve)
     with prepared_board(board_path, project_path) as (load_path, used_project):

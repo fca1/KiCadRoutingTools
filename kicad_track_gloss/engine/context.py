@@ -50,6 +50,7 @@ class PlannerContext:
         # width fallback and refinement searches. Blocker checks are pure for
         # one immutable model, so share their results across those views.
         self.path_blockers = {}
+        self.smart_envelopes = {}
         self.segment_by_key = {segment_key(segment): segment
                                for segment in model.segments}
         clearances = list(model.net_clearances.values())

@@ -1,4 +1,4 @@
-"""KiCad 10 ActionPlugin entry points for the Real Spirit gloss engine."""
+"""KiCad 10 ActionPlugin entry points for the Smart Octo gloss engine."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ import wx
 
 from .configuration import get_session_config
 from .engine.model import segment_key
-from .engine.real_spirit import (localized_drc_remainder,
-                                 plan_selected_copper)
+from .engine.smart_octo import (localized_drc_remainder,
+                                plan_selected_copper)
 from .engine.statistics import summarize_plan
 from .kicad import BoardAdapter
 from .kicad.native_validation import start_native_baseline_warmup
@@ -24,6 +24,7 @@ from .kicad.report_dialog import (show_diagnostic_report as _show_diagnostic_rep
                                   show_report as _show_report,
                                   warning_bell as _warning_bell)
 from .kicad.settings_dialog import show_session_settings
+from .kicad.smart_octo_overlay import toggle_overlay
 from .kicad.types import is_arc, is_straight_track, is_via
 from .version import __version__
 
@@ -175,7 +176,7 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         operation_deadline = started + total_budget
         # Scheduling reserve only: it is not another user budget.  It keeps a
         # portion of the single total deadline available for the one final DRC.
-        validation_reserve = min(8.0, total_budget * 0.40)
+        validation_reserve = min(4.0, total_budget * 0.20)
         planning_deadline = operation_deadline - validation_reserve
         adapter = BoardAdapter(pcbnew)
         snapshot = adapter.snapshot(board)
@@ -332,3 +333,45 @@ class KiCadTrackGlossDiagnosticPlugin(KiCadTrackGlossPlugin):
             if changed is False:
                 _warning_bell()
         _show_diagnostic_report("KiCad Track Gloss — Diagnostic", report)
+
+
+class KiCadTrackGlossSmartOctoOverlayPlugin(pcbnew.ActionPlugin):
+    def defaults(self):
+        self.name = "KiCad Track Gloss — Toggle Smart Octo obstacles"
+        self.category = "Routing"
+        self.description = (
+            "Show or remove the sourced Smart Octo clearance envelopes")
+        self.show_toolbar_button = False
+        self.icon_file_name = os.path.join(PLUGIN_DIR, "icon_24.png")
+
+    def Run(self):
+        board = pcbnew.GetBoard()
+        if board is None:
+            _show_report("KiCad Track Gloss — Smart Octo", [
+                "No active PCB board."])
+            return
+        try:
+            adapter = BoardAdapter(pcbnew)
+            snapshot = adapter.snapshot(board)
+            shown, count, layer = toggle_overlay(adapter, board, snapshot)
+            board.SetModified()
+            pcbnew.Refresh()
+            if shown:
+                message = [
+                    "Smart Octo obstacle overlay created.",
+                    "Layer: " + layer,
+                    "Effective/source polygons: {}.".format(count),
+                    "Run this command again to remove the complete overlay.",
+                ]
+            else:
+                message = [
+                    "Smart Octo obstacle overlay removed.",
+                    "Graphic items removed: {}.".format(count),
+                ]
+            _show_report("KiCad Track Gloss — Smart Octo", message)
+        except Exception:
+            LOG.exception("Smart Octo overlay failed")
+            _show_report("KiCad Track Gloss — Smart Octo", [
+                "Unable to update the diagnostic overlay.", "",
+                traceback.format_exc(),
+            ])

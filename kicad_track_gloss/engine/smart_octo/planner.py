@@ -1,10 +1,9 @@
-"""Deterministic fixed-point planner for the Real Spirit gloss engine."""
+"""Deterministic fixed-point planner for the Smart Octo gloss engine."""
 
 from __future__ import annotations
 
 import time
 
-from ..candidate_geometry import retain_identity_replacements
 from ..context import PlannerContext
 from ..geometry import length
 from ..model import BoardModel, GlossResult, Segment, Transformation, segment_key
@@ -13,6 +12,7 @@ from .contraction import contract_polyline
 from .contacts import contact_descent_targets, insert_contact_points
 from .copper import map_path_to_copper, path_is_safe, path_length
 from .reconstruction import reconstruct_octolinear
+from .safety import retain_identity_replacements
 from .topology import extract_chains
 
 
@@ -113,7 +113,7 @@ def _apply_to_model(model, editable, plan, generation):
             retained.append(segment)
     for index, addition in enumerate(plan.additions):
         source = source_by_net.get(addition.net_id)
-        key = "real-spirit:{}:{}".format(generation, index)
+        key = "smart-octo:{}:{}".format(generation, index)
         segment = Segment(
             addition.start[0], addition.start[1],
             addition.end[0], addition.end[1], addition.width,

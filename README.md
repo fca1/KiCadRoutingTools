@@ -1,6 +1,6 @@
 # KiCad Track Gloss
 
-KiCad Track Gloss 2.0 is a KiCad 10 ActionPlugin that contracts selected routed
+KiCad Track Gloss 2.1 is a KiCad 10 ActionPlugin that contracts selected routed
 copper as a taut polyline, then reconstructs a connected 0/45/90-degree track.
 It is a post-route gloss, not a router: it preserves the existing connection's
 topology and does not run A*.
@@ -18,8 +18,7 @@ is never saved automatically. One KiCad Undo reverts the operation.
 
 Documentation:
 
-- [Smart Octo next-release specification](docs/smart-octo.md)
-- [Real Spirit specification](docs/real-spirit.md)
+- [Smart Octo specification](docs/smart-octo.md)
 - [Architecture](docs/architecture.md)
 - [Plugin usage](docs/plugin-usage.md)
 - [CLI](docs/cli.md)

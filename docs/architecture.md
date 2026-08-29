@@ -1,47 +1,44 @@
-# Real Spirit architecture
+# Smart Octo architecture
 
-KiCad Track Gloss 2 uses one planner. It does not keep the historical candidate
-portfolio, pattern operators, recursive fallbacks, per-candidate workers, DRC
-salvage ladder, or A* routing.
+KiCad Track Gloss 2.1 has one post-route planner. It contains no geometry
+pattern catalogue, fallback planner, candidate portfolio, A* search, or per-net
+native DRC.
 
 ## Boundaries
 
-- `kicad_track_gloss/kicad/` is the KiCad 10 authority boundary: selection,
-  locks, evaluated rules, exact pads, board snapshots, writes, Undo, and native
-  DRC.
-- `kicad_track_gloss/engine/real_spirit/` is API-neutral geometry: topology,
-  inflated obstacles, contraction, contacts, 0/45/90 reconstruction, and
-  deterministic fixed-point passes.
-- `candidate_geometry.py`, `context.py`, `pads.py`, and `validation.py` contain
-  shared exact geometry and connectivity primitives. They do not plan routes.
+- `kicad_track_gloss/kicad/` owns the KiCad 10 boundary: selection, locks,
+  evaluated rules, snapshots, writes, optional overlay and final native DRC.
+- `kicad_track_gloss/engine/smart_octo/` owns API-neutral clearance provenance,
+  octolinear envelopes, topology, continuous contraction, reconstruction,
+  safety and deterministic passes.
+- Shared `context.py`, `pads.py`, `geometry.py` and `validation.py` provide
+  spatial indexing and geometry/connectivity primitives; they do not plan.
 
 ## Data flow
 
-1. A selected straight segment authorizes its expanded connection.
-2. Topology divides authorized copper at pads, vias, fixed nodes, and T rails.
-3. Every chain is contracted as one polyline inside its existing routed
-   homotopy. Interior segment translations are continuous degrees of freedom.
-4. Round clearance contacts are represented for reconstruction by conservative
-   octolinear polygons, never by sampled arcs.
-5. Reconstruction keeps the existing copper as incumbent and replaces only
-   spans proven shorter, connected, safe, and clean at 0/45/90 degrees.
-6. Single-net work repeats to a true fixed point. Multi-net work applies nets
-   sequentially, reverses deterministic order between passes, and retains the
-   best complete incumbent when time expires.
-7. The composed plan receives one final global native DRC comparison when that
-   option is enabled, then is applied to the live board as one Undo operation.
+1. Selection authorizes complete connected copper scopes.
+2. KiCad supplies real copper geometry and evaluated per-object/layer rules.
+3. Smart Octo resolves moving and obstacle clearance sources and retains their
+   maximum; it constructs only one effective forbidden polygon.
+4. The selected polyline retains only its real copper width and contracts
+   continuously against those polygons.
+5. Topology provides fixed nodes, pad terminals and sliding T rails.
+6. Reconstruction emits only connected 0/45/90 copper and removes redundant
+   collinear segments.
+7. Single connections repeat to a fixed point; multi-net work alternates
+   deterministic order and retains every complete safe incumbent.
+8. One optional global native DRC comparison validates the composed plan before
+   atomic application to the live board.
 
-## T junctions
+## Explainability
 
-A degree-three junction with one collinear pair is a T. The pair is a fixed
-rail and the outside branch may slide on it. A degree-three junction without a
-collinear pair is a fixed node. Higher-degree junctions enumerate every exact
-collinear-pair/outside-branch interpretation. Unselected same-net copper may be
-a rail but is never rewritten.
+`smart_octo/diagnostic.py` produces API-neutral sourced and effective polygons.
+`kicad/smart_octo_overlay.py` renders them as one locked, removable group on an
+unused `User.*` information layer. The overlay has no dependency back into the
+planner and never affects safety decisions.
 
 ## Time contract
 
-There is one user-visible total budget. It covers planning and final DRC. A
-deadline never discards a complete improvement already found. Native baseline
-DRC may run concurrently with API-neutral planning so final validation does not
-repeat board-wide work.
+One user-visible total budget covers planning and validation. Native baseline
+DRC may overlap planning. The internal reserve is scheduling, not a second
+budget. A deadline retains the best fully composed safe state already found.

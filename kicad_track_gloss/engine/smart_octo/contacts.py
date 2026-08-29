@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import math
 
-from ..candidate_geometry import (circular_obstacle_required_distance,
-                                  track_pair_required_distance)
 from ..context import line_bbox
 from ..geometry import length
 from ..model import segment_key
-from .obstacles import (circular_envelope, outward_normal, track_envelope)
+from .obstacles import (circular_envelope, outward_normal, pad_envelopes,
+                        track_envelope)
 
 
 def _closest_segment_points(a, b, c, d):
@@ -71,6 +70,11 @@ def _polygon_contacts(start, end, polygon, tolerance):
     contacts = []
     if len(polygon) < 2:
         return ()
+    if (max(start[0], end[0]) < min(point[0] for point in polygon) - tolerance or
+            min(start[0], end[0]) > max(point[0] for point in polygon) + tolerance or
+            max(start[1], end[1]) < min(point[1] for point in polygon) - tolerance or
+            min(start[1], end[1]) > max(point[1] for point in polygon) + tolerance):
+        return ()
     for obstacle_start, obstacle_end in zip(
             polygon, polygon[1:] + polygon[:1]):
         normal = outward_normal(obstacle_start, obstacle_end)
@@ -100,6 +104,28 @@ def _polygon_contacts(start, end, polygon, tolerance):
         for parameter, point, normal in contacts)))
 
 
+def _cached(context, kind, moving, obstacle, build):
+    key = (kind, moving, obstacle)
+    if key not in context.smart_envelopes:
+        context.smart_envelopes[key] = build()
+    return context.smart_envelopes[key]
+
+
+def _track_envelope(context, model, moving, foreign):
+    return _cached(context, "track", moving, foreign,
+                   lambda: track_envelope(model, moving, foreign))
+
+
+def _circular_envelope(context, model, moving, obstacle):
+    return _cached(context, "circle", moving, obstacle,
+                   lambda: circular_envelope(model, moving, obstacle))
+
+
+def _pad_envelopes(context, model, moving, pad):
+    return _cached(context, "pad", moving, pad,
+                   lambda: pad_envelopes(model, moving, pad))
+
+
 def _active_normals(model, path, vertex_index, moving, replaced_keys,
                     context):
     """Linearized feasible half-spaces at one supported path vertex."""
@@ -119,7 +145,8 @@ def _active_normals(model, path, vertex_index, moving, replaced_keys,
                     foreign.net_id == moving.net_id):
                 continue
             for parameter, _point, normal in _polygon_contacts(
-                    start, end, track_envelope(model, moving, foreign),
+                    start, end, _track_envelope(
+                        context, model, moving, foreign).support_polygon,
                     2.0 * quantum):
                 coefficient = (parameter if moving_vertex_parameter == 1.0
                                else 1.0 - parameter)
@@ -134,12 +161,26 @@ def _active_normals(model, path, vertex_index, moving, replaced_keys,
                     (obstacle.layers and moving.layer not in obstacle.layers)):
                 continue
             for parameter, _point, normal in _polygon_contacts(
-                    start, end, circular_envelope(model, moving, obstacle),
+                    start, end, _circular_envelope(
+                        context, model, moving, obstacle).support_polygon,
                     2.0 * quantum):
                 coefficient = (parameter if moving_vertex_parameter == 1.0
                                else 1.0 - parameter)
                 if coefficient > quantum:
                     normals.append(normal)
+        pad_margin = (context.max_pad_radius + moving.width / 2.0 +
+                      context.max_net_clearance + quantum)
+        for pad in context.pads.query(line_bbox(start, end, pad_margin)):
+            if (pad.net_id == moving.net_id or
+                    (pad.layers and moving.layer not in pad.layers)):
+                continue
+            for envelope in _pad_envelopes(context, model, moving, pad):
+                for parameter, _point, normal in _polygon_contacts(
+                        start, end, envelope.support_polygon, 2.0 * quantum):
+                    coefficient = (parameter if moving_vertex_parameter == 1.0
+                                   else 1.0 - parameter)
+                    if coefficient > quantum:
+                        normals.append(normal)
     return tuple(sorted(set((round(x, 12), round(y, 12))
                             for x, y in normals)))
 
@@ -219,7 +260,8 @@ def insert_contact_points(model, path, moving, replaced_keys, context,
                     foreign.net_id == moving.net_id):
                 continue
             for parameter, point, _normal in _polygon_contacts(
-                    start, end, track_envelope(model, moving, foreign),
+                    start, end, _track_envelope(
+                        context, model, moving, foreign).support_polygon,
                     2.0 * quantum):
                 retain(parameter, point)
 
@@ -231,9 +273,21 @@ def insert_contact_points(model, path, moving, replaced_keys, context,
                     (obstacle.layers and moving.layer not in obstacle.layers)):
                 continue
             for parameter, point, _normal in _polygon_contacts(
-                    start, end, circular_envelope(model, moving, obstacle),
+                    start, end, _circular_envelope(
+                        context, model, moving, obstacle).support_polygon,
                     2.0 * quantum):
                 retain(parameter, point)
+
+        pad_margin = (context.max_pad_radius + moving.width / 2.0 +
+                      context.max_net_clearance + quantum)
+        for pad in context.pads.query(line_bbox(start, end, pad_margin)):
+            if (pad.net_id == moving.net_id or
+                    (pad.layers and moving.layer not in pad.layers)):
+                continue
+            for envelope in _pad_envelopes(context, model, moving, pad):
+                for parameter, point, _normal in _polygon_contacts(
+                        start, end, envelope.support_polygon, 2.0 * quantum):
+                    retain(parameter, point)
 
         for _parameter, location in sorted(set(
                 (round(parameter, 12),
@@ -313,8 +367,11 @@ def _repair_clearance(model, path, moving, replaced_keys, context,
                     start, end,
                     (foreign.start_x, foreign.start_y),
                     (foreign.end_x, foreign.end_y))
-                correct(q, p, parameter,
-                        track_pair_required_distance(model, moving, foreign))
+                envelope = _track_envelope(context, model, moving, foreign)
+                correct(
+                    q, p, parameter,
+                    (moving.width + foreign.width) / 2.0 +
+                    envelope.effective_clearance)
 
             obstacle_margin = (
                 context.max_obstacle_radius + moving.width / 2.0 +
@@ -327,9 +384,11 @@ def _repair_clearance(model, path, moving, replaced_keys, context,
                     continue
                 centre = obstacle.x, obstacle.y
                 p, parameter = _closest_point_on_segment(centre, start, end)
-                correct(centre, p, parameter,
-                        circular_obstacle_required_distance(
-                            model, moving, obstacle))
+                envelope = _circular_envelope(context, model, moving, obstacle)
+                correct(
+                    centre, p, parameter,
+                    obstacle.radius + moving.width / 2.0 +
+                    envelope.effective_clearance)
         if largest <= tolerance:
             break
     return tuple((point[0], point[1]) for point in points)

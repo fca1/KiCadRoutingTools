@@ -5,6 +5,12 @@ exact pad geometry, keepouts, Edge.Cuts, locks, and native protection. It checks
 every new segment against those API-neutral snapshots and verifies connectivity
 before native validation.
 
+For foreign copper, Smart Octo retains the maximum of the moving-object
+clearance, obstacle clearance and applicable board floor. It builds one
+conservative 0/45/90-sided obstacle and tests the real-width moving copper
+against it. Source values remain diagnostic metadata, not separate solver
+obstacles.
+
 When enabled, native DRC is called only for the final composed plan. A private
 baseline board and candidate board are checked with the same project and rule
 files; the plan is accepted only if no DRC category/fingerprint increases. The

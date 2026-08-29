@@ -1,12 +1,12 @@
-"""Copper reconstruction and exact shared safety gate for Real Spirit."""
+"""Copper reconstruction and exact shared safety gate for Smart Octo."""
 
 from __future__ import annotations
 
 from dataclasses import replace
 
-from ..candidate_geometry import path_blocker
 from ..geometry import length
 from ..model import AddedSegment, segment_key
+from .safety import path_blocker
 
 
 def path_length(path):

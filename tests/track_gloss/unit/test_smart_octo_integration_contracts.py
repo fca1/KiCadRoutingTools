@@ -33,9 +33,18 @@ def test_busy_cursor_is_delayed_and_no_progress_dialog_remains():
     assert "ProgressDialog" not in action
 
 
+def test_smart_octo_overlay_is_separate_and_removable():
+    action = source("kicad_track_gloss/action_plugin.py")
+    overlay = source("kicad_track_gloss/kicad/smart_octo_overlay.py")
+    assert "KiCadTrackGlossSmartOctoOverlayPlugin" in action
+    assert "TrackGloss Smart Octo Overlay" in overlay
+    assert "remove_overlay" in overlay
+    assert "User_" in overlay
+
+
 def test_diagnostic_summary_keeps_only_decision_information():
     summary, details, json_lines = split_diagnostic_report([
-        "Plugin version: 2.0.0",
+        "Plugin version: 2.1.0",
         "File: board.kicad_pcb",
         "Path: C:/boards/board.kicad_pcb",
         "Scope: 1 selected connection(s), 1 net(s): GND",
@@ -55,6 +64,6 @@ def test_diagnostic_summary_keeps_only_decision_information():
         "Primary reason: already at fixed point.",
         "Total time: 0.120 s.",
     ]
-    assert details[0] == "Plugin version: 2.0.0"
+    assert details[0] == "Plugin version: 2.1.0"
     assert json_lines == [
         "No machine-readable result is available for this run."]

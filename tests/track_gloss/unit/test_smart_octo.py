@@ -1,13 +1,17 @@
-"""Contract tests for the clean-room Real Spirit engine."""
+"""Contract tests for the Smart Octo engine."""
+
+from dataclasses import replace
 
 import pytest
 
-from kicad_track_gloss.engine.model import AddedSegment, BoardModel, GlossResult, Segment
-from kicad_track_gloss.engine.real_spirit import (build_topology, extract_chains,
-                                                  localized_drc_remainder,
-                                                  plan_selected_copper)
-from kicad_track_gloss.engine.real_spirit.obstacles import (
-    octolinear_disk, segment_penetrates, track_envelope)
+from kicad_track_gloss.engine.model import (AddedSegment, BoardModel,
+                                            GlossResult, PadRegion, Segment)
+from kicad_track_gloss.engine.smart_octo import (build_topology, extract_chains,
+                                                 collect_diagnostic_polygons,
+                                                 localized_drc_remainder,
+                                                 plan_selected_copper)
+from kicad_track_gloss.engine.smart_octo.obstacles import (
+    octolinear_disk, pad_envelopes, segment_penetrates, track_envelope)
 
 
 def segment(a, b, key, *, net=1, layer=0):
@@ -164,10 +168,64 @@ def test_round_clearance_is_one_clean_octolinear_polygon():
 def test_round_track_ends_are_integrated_in_one_clean_polygon():
     moving = segment((0, 3), (4, 3), "moving")
     foreign = segment((0, 0), (4, 0), "foreign", net=2)
-    polygon = track_envelope(model(moving, foreign), moving, foreign)
+    envelope = track_envelope(model(moving, foreign), moving, foreign)
+    polygon = envelope.support_polygon
 
     assert len(polygon) <= 10
     for start, end in zip(polygon, polygon[1:] + polygon[:1]):
+        dx, dy = abs(end[0] - start[0]), abs(end[1] - start[1])
+        assert dx == pytest.approx(0.0, abs=1e-12) or \
+            dy == pytest.approx(0.0, abs=1e-12) or \
+            dx == pytest.approx(dy, abs=1e-12)
+
+
+def test_one_effective_envelope_uses_maximum_sourced_clearance():
+    moving = replace(
+        segment((0, 3), (4, 3), "moving"), clearance=0.25)
+    foreign = replace(
+        segment((0, 0), (4, 0), "foreign", net=2), clearance=0.6)
+    envelope = track_envelope(model(moving, foreign), moving, foreign)
+
+    assert envelope.moving_clearance == pytest.approx(0.25)
+    assert envelope.obstacle_clearance == pytest.approx(0.6)
+    assert envelope.effective_clearance == pytest.approx(0.6)
+    assert envelope.winning_source == "obstacle"
+    assert len(envelope.forbidden_polygon) <= 10
+    assert len(envelope.support_polygon) <= 10
+
+
+def test_diagnostic_keeps_sources_but_solver_has_one_effective_polygon():
+    moving = replace(
+        segment((0, 1), (4, 1), "moving"), clearance=0.25)
+    foreign = replace(
+        segment((0, 0), (4, 0), "foreign", net=2), clearance=0.6)
+
+    polygons = collect_diagnostic_polygons(
+        model(moving, foreign), {"moving"})
+
+    assert {polygon.role for polygon in polygons} == {
+        "moving", "obstacle", "effective"}
+    effective = [polygon for polygon in polygons
+                 if polygon.role == "effective"]
+    assert len(effective) == 1
+    assert effective[0].clearance == pytest.approx(0.6)
+    assert effective[0].winning_source == "obstacle"
+
+
+def test_rotated_pad_becomes_one_clean_effective_octolinear_polygon():
+    moving = replace(
+        segment((0, 3), (4, 3), "moving"), clearance=0.25)
+    pad = PadRegion(
+        2.0, 0.0, 2.0, 1.0, 17.0, "rect", 0.0, 2, (0,), 0.4)
+    envelope, = pad_envelopes(
+        BoardModel([moving], pad_regions=[pad], minimum_clearance=0.2),
+        moving, pad)
+
+    assert envelope.effective_clearance == pytest.approx(0.4)
+    assert len(envelope.support_polygon) <= 8
+    for start, end in zip(
+            envelope.support_polygon,
+            envelope.support_polygon[1:] + envelope.support_polygon[:1]):
         dx, dy = abs(end[0] - start[0]), abs(end[1] - start[1])
         assert dx == pytest.approx(0.0, abs=1e-12) or \
             dy == pytest.approx(0.0, abs=1e-12) or \

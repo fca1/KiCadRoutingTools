@@ -22,14 +22,14 @@ Build the archive and the metadata directory ready to copy into a fork of the
 official KiCad addons metadata repository:
 
 ```powershell
-py -3.12 kicad_track_gloss\package_pcm.py --release-tag v2.0.0-test
+py -3.12 kicad_track_gloss\package_pcm.py --release-tag v2.1.0-test
 ```
 
 Generated files:
 
 ```text
-dist/KiCadTrackGloss-2.0.0.zip
-dist/KiCadTrackGloss-2.0.0.meta.json
+dist/KiCadTrackGloss-2.1.0.zip
+dist/KiCadTrackGloss-2.1.0.meta.json
 dist/kicad-official/packages/com.github.fca1.kicadtrackgloss/metadata.json
 dist/kicad-official/packages/com.github.fca1.kicadtrackgloss/icon.png
 ```
