@@ -33,17 +33,32 @@ circumscribed conservatively instead of being sampled as a curved succession
 of short edges. A complex object may be decomposed into primitive octagons and
 their exact geometric union.
 
-For each moving-net/obstacle pair, two independently attributable envelopes are
-constructed:
+For each moving-net/obstacle pair, two independently attributable clearance
+values are resolved:
 
-1. the obstacle copper dilated by the clearance imposed by the moving net;
-2. the same obstacle copper dilated by the clearance imposed by the obstacle.
+1. the clearance imposed by the moving net;
+2. the clearance imposed by the obstacle.
 
-The forbidden obstacle is the geometric union (the Boolean OR) of these two
-polygons. The clearances are never added together. If the two polygons are
-nested, their union naturally reduces to the outer polygon. Both sources remain
-recorded for diagnostics even when only one exterior boundary reaches the
-solver.
+These values are never added. The effective clearance is their maximum, also
+bounded by KiCad's applicable board minimum and any pairwise rule that is
+directly available:
+
+```text
+effective clearance = max(moving-net clearance,
+                          obstacle clearance,
+                          applicable KiCad floors)
+```
+
+Only one final octolinear envelope is constructed by dilating the obstacle
+copper with this effective value. Building two homothetic or parallel-offset
+octagons and calculating their Boolean union would produce the same outer
+polygon, because the smaller envelope is contained in the larger one. The two
+source values and the winning rule remain recorded for diagnostics, but this
+provenance does not duplicate the solver geometry.
+
+A true polygon union is reserved for non-uniform constraints that create
+non-nested envelopes, or for assembling several primitive octagons into one
+complex obstacle. It is not part of the normal uniform-clearance calculation.
 
 The moving polyline retains its own real copper thickness. Collision therefore
 means that this thick polyline intersects the consolidated forbidden polygon.
@@ -131,9 +146,8 @@ An optional diagnostic command renders the model on a dedicated KiCad
 `User.*` information layer:
 
 - initial copper centreline and real width;
-- envelope produced by the moving-net clearance;
-- envelope produced by the obstacle clearance;
-- their consolidated union;
+- optional explanatory envelopes produced by each source clearance;
+- the single effective envelope produced by their maximum;
 - fixed nodes, T rails and sliding terminals;
 - contact points and final reconstructed polyline;
 - rule source and numerical clearance associated with each envelope.
@@ -152,7 +166,8 @@ overlay and machine-readable output.
 The production engine is divided into narrow one-way stages:
 
 1. **KiCad snapshot and rule resolution** — authoritative input extraction;
-2. **Smart Octo envelope builder** — two sourced polygons and their union;
+2. **Smart Octo envelope builder** — sourced clearance values, their maximum,
+   and one effective polygon;
 3. **Topology** — chains, fixed nodes, rails and sliding T branches;
 4. **Continuous contraction** — taut-polyline fixed-point solver;
 5. **Octolinear reconstruction** — clean 0/45/90 copper;
@@ -171,7 +186,12 @@ not after every intermediate change.
 
 ### Geometric invariant tests
 
-- Boolean union of the two clearance polygons, including nested envelopes;
+- maximum of the two sourced clearances and construction of one effective
+  envelope;
+- equivalence between that envelope and the union of two nested diagnostic
+  envelopes;
+- explicit polygon union only for genuinely non-nested constraints or complex
+  obstacles composed from several primitives;
 - irregular elongated track octagons and circumscribed round obstacles;
 - tangent contact accepted, strict penetration rejected;
 - no sampled arc and no chain of short segments around a round obstacle;
