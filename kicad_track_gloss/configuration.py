@@ -17,12 +17,6 @@ class GlossPolicy:
 
 
 @dataclass(frozen=True)
-class ConvergencePolicy:
-    interactive_group_max_passes: int
-    cli_max_passes: int
-
-
-@dataclass(frozen=True)
 class SafetyPolicy:
     use_kicad_native_drc: bool
 
@@ -30,8 +24,6 @@ class SafetyPolicy:
 @dataclass(frozen=True)
 class TimingPolicy:
     interactive_total_time_budget_seconds: float
-    interactive_planning_time_budget_seconds: float
-    interactive_cancellation_grace_seconds: float
     cli_total_time_budget_seconds: float | None
 
 
@@ -39,15 +31,8 @@ class TimingPolicy:
 class InternalConfig:
     schema_version: int
     gloss: GlossPolicy
-    convergence: ConvergencePolicy
     timing: TimingPolicy
     safety: SafetyPolicy
-
-
-def _positive_integer(value, field):
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError("{} must be an integer of at least one".format(field))
-    return value
 
 
 def _positive_number(value, field, *, allow_zero=False):
@@ -72,7 +57,6 @@ def load_internal_config(path=CONFIG_PATH):
         raise ValueError("unsupported Track Gloss configuration schema")
     try:
         gloss = document["gloss"]
-        convergence = document["convergence"]
         timing = document["timing"]
         safety = document["safety"]
         minimum = gloss["minimum_saved_length_mm"]
@@ -89,12 +73,6 @@ def load_internal_config(path=CONFIG_PATH):
     total_budget = _positive_number(
         timing.get("interactive_total_time_budget_seconds"),
         "timing.interactive_total_time_budget_seconds")
-    planning_budget = _positive_number(
-        timing.get("interactive_planning_time_budget_seconds"),
-        "timing.interactive_planning_time_budget_seconds")
-    if planning_budget > total_budget:
-        raise ValueError(
-            "interactive planning time budget cannot exceed total time budget")
     cli_budget = timing.get("cli_total_time_budget_seconds")
     if cli_budget is not None:
         cli_budget = _positive_number(
@@ -102,20 +80,8 @@ def load_internal_config(path=CONFIG_PATH):
     return InternalConfig(
         schema_version=1,
         gloss=GlossPolicy(float(minimum)),
-        convergence=ConvergencePolicy(
-            _positive_integer(
-                convergence.get("interactive_group_max_passes"),
-                "convergence.interactive_group_max_passes"),
-            _positive_integer(
-                convergence.get("cli_max_passes"),
-                "convergence.cli_max_passes")),
         timing=TimingPolicy(
             total_budget,
-            planning_budget,
-            _positive_number(
-                timing.get("interactive_cancellation_grace_seconds"),
-                "timing.interactive_cancellation_grace_seconds",
-                allow_zero=True),
             cli_budget),
         safety=SafetyPolicy(use_native_drc))
 
@@ -130,28 +96,14 @@ def get_session_config():
 
 
 def update_session_config(*, minimum_saved_length_mm,
-                          interactive_group_max_passes,
                           interactive_total_time_budget_seconds,
-                          interactive_planning_time_budget_seconds,
-                          interactive_cancellation_grace_seconds,
                           use_kicad_native_drc):
     """Validate and install process-local values; never writes the JSON file."""
     global _SESSION_CONFIG
     minimum = _positive_number(
         minimum_saved_length_mm, "minimum saved length", allow_zero=True)
-    group_passes = _positive_integer(
-        interactive_group_max_passes, "interactive group maximum passes")
     total_budget = _positive_number(
         interactive_total_time_budget_seconds, "interactive total time budget")
-    planning_budget = _positive_number(
-        interactive_planning_time_budget_seconds,
-        "interactive planning time budget")
-    cancellation_grace = _positive_number(
-        interactive_cancellation_grace_seconds,
-        "interactive cancellation grace", allow_zero=True)
-    if planning_budget > total_budget:
-        raise ValueError(
-            "interactive planning time budget cannot exceed total time budget")
     if not isinstance(use_kicad_native_drc, bool):
         raise ValueError("KiCad native DRC must be a boolean")
     current = _SESSION_CONFIG
@@ -159,14 +111,9 @@ def update_session_config(*, minimum_saved_length_mm,
         current,
         gloss=replace(
             current.gloss, minimum_saved_length_mm=minimum),
-        convergence=replace(
-            current.convergence,
-            interactive_group_max_passes=group_passes),
         timing=replace(
             current.timing,
-            interactive_total_time_budget_seconds=total_budget,
-            interactive_planning_time_budget_seconds=planning_budget,
-            interactive_cancellation_grace_seconds=cancellation_grace),
+            interactive_total_time_budget_seconds=total_budget),
         safety=replace(
             current.safety,
             use_kicad_native_drc=use_kicad_native_drc))

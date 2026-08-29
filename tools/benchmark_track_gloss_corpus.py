@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path(__file__).with_name("score_track_gloss.py"),
     )
-    parser.add_argument("--max-passes", type=int, default=16)
+    parser.add_argument("--time-budget", type=float, default=60.0)
     parser.add_argument(
         "--minimum-saved-length-mm", type=float, default=None, metavar="MM",
         help="override the shared Track Gloss minimum saving for this run",
@@ -122,8 +122,8 @@ def main() -> int:
     kicad_python = args.kicad_python.resolve()
     if output.exists():
         raise SystemExit(f"output directory already exists: {output}")
-    if args.max_passes < 1:
-        raise SystemExit("--max-passes must be at least one")
+    if not math.isfinite(args.time_budget) or args.time_budget <= 0.0:
+        raise SystemExit("--time-budget must be positive")
     if (args.minimum_saved_length_mm is not None and
             (not math.isfinite(args.minimum_saved_length_mm) or
              args.minimum_saved_length_mm < 0.0)):
@@ -153,7 +153,7 @@ def main() -> int:
         result_json = raw / f"{project.stem}.json"
         command = [
             str(kicad_python), str(cli), str(project),
-            "--max-passes", str(args.max_passes),
+            "--time-budget", str(args.time_budget),
             "--json-out", str(result_json),
         ]
         if args.minimum_saved_length_mm is not None:
@@ -178,19 +178,11 @@ def main() -> int:
             continue
         payload = json.loads(result_json.read_text(encoding="utf-8"))
         timings = payload.get("timings_ms", {})
-        native_timings = payload.get("native_drc_timings_ms", {})
         resolved_minimum = payload.get(
             "minimum_saved_length_mm", args.minimum_saved_length_mm)
         if resolved_minimum is not None:
             resolved_minimums.add(float(resolved_minimum))
-        measured_native_ms = (
-            float(timings.get("native_portfolio", 0.0)) +
-            float(timings.get("native_primary", 0.0)) +
-            float(timings.get("native_fallback", 0.0)))
-        if measured_native_ms <= 0.0:
-            # Backward compatibility with CLI payloads predating phase-level
-            # timings. Their single native report is still the best measure.
-            measured_native_ms = float(native_timings.get("total", 0.0))
+        measured_native_ms = float(timings.get("native_drc", 0.0))
         rows.append({
             "project": project.stem,
             "planned_saved_mm": float(payload.get(
@@ -203,8 +195,7 @@ def main() -> int:
                 if "planned_removed" in payload else payload["segments_saved"]),
             "elapsed_seconds": round(elapsed, 6),
             "planning_seconds": round(
-                (float(timings.get("planning_primary", 0.0)) +
-                 float(timings.get("planning_fallback", 0.0))) / 1000.0, 6),
+                float(timings.get("planning", 0.0)) / 1000.0, 6),
             "native_seconds": round(
                 measured_native_ms / 1000.0, 6),
             "passes": int(payload["convergence_passes"]),
@@ -225,13 +216,12 @@ def main() -> int:
         "kicad_python": str(kicad_python),
         "driver_python": sys.version,
         "platform": platform.platform(),
-        "max_passes": args.max_passes,
         "minimum_saved_length_mm": (
             next(iter(resolved_minimums))
             if len(resolved_minimums) == 1 else sorted(resolved_minimums)),
-        "time_budget_seconds": None,
+        "time_budget_seconds": args.time_budget,
         "board_execution": "sequential",
-        "engine_parallelism": "enabled",
+        "engine_parallelism": "baseline DRC overlaps geometric planning",
         "project_count": len(projects),
         "successful_projects": len(rows),
         "excluded_projects": sorted(excluded),

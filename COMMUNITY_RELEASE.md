@@ -1,4 +1,4 @@
-# Community alpha release
+# Community testing release
 
 KiCad Track Gloss is packaged as a KiCad 10 SWIG ActionPlugin and follows the
 official Plugin and Content Manager archive layout:
@@ -14,24 +14,22 @@ resources/
 ```
 
 The archive metadata targets PCM schema v2. The package identifier is
-`com.github.fca1.kicadtrackgloss`, the version status is `testing`, and the
-numeric PCM version is used because the KiCad schema does not accept a
-prerelease suffix. The corresponding GitHub release is marked as a prerelease.
-Compatibility is explicitly bounded to KiCad 10.x because this alpha uses the
-legacy SWIG ActionPlugin runtime.
+`com.github.fca1.kicadtrackgloss` and the version status is `testing`.
+Compatibility is explicitly bounded to KiCad 10.x; no older KiCad fallback is
+packaged.
 
 Build the archive and the metadata directory ready to copy into a fork of the
 official KiCad addons metadata repository:
 
 ```powershell
-py -3.12 kicad_track_gloss\package_pcm.py --release-tag v0.3.28-alpha
+py -3.12 kicad_track_gloss\package_pcm.py --release-tag v2.0.0-test
 ```
 
 Generated files:
 
 ```text
-dist/KiCadTrackGloss-0.3.28.zip
-dist/KiCadTrackGloss-0.3.28.meta.json
+dist/KiCadTrackGloss-2.0.0.zip
+dist/KiCadTrackGloss-2.0.0.meta.json
 dist/kicad-official/packages/com.github.fca1.kicadtrackgloss/metadata.json
 dist/kicad-official/packages/com.github.fca1.kicadtrackgloss/icon.png
 ```

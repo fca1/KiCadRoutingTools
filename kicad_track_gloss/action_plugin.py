@@ -1,9 +1,11 @@
-"""KiCad 10 SWIG ActionPlugin entry point for selection-seeded track gloss."""
+"""KiCad 10 ActionPlugin entry points for the Real Spirit gloss engine."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+from pathlib import Path
 import threading
 import time
 import traceback
@@ -12,17 +14,12 @@ import pcbnew
 import wx
 
 from .configuration import get_session_config
-from .engine import (find_pad_terminal_targets, find_track_terminal_vertices,
-                     compose_compatible_connection_plans,
-                     generate_connection_candidates, generate_converged_plan,
-                     generate_plan_continuations,
-                     plan_identity, plan_net_ids, rank_candidate_plans,
-                     summarize_plan)
-from .engine.model import GlossResult, segment_key
+from .engine.model import segment_key
+from .engine.real_spirit import (localized_drc_remainder,
+                                 plan_selected_copper)
+from .engine.statistics import summarize_plan
 from .kicad import BoardAdapter
-from .kicad.diagnostics import append_plan_statistics, append_search_statistics
-from .kicad.native_salvage import (
-    maximize_safe_native_candidates as _maximize_safe_native_candidates)
+from .kicad.native_validation import start_native_baseline_warmup
 from .kicad.report_dialog import (show_diagnostic_report as _show_diagnostic_report,
                                   show_report as _show_report,
                                   warning_bell as _warning_bell)
@@ -33,27 +30,20 @@ from .version import __version__
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG = logging.getLogger("KiCadTrackGloss")
-
-# One-click policy: no preview or success/no-op popup. Session settings are
-# intentionally reachable only by invoking either action with no track seed.
-# Native KiCad DRC validation is intentionally retained as a safety gate and
-# can dominate response time even for a single selected connection.
 BUSY_CURSOR_DELAY_SECONDS = 3.0
 BUSY_CURSOR_POLL_SECONDS = 0.05
 
 
 class NoTrackSelection(ValueError):
-    """Normal user condition which opens process-local session settings."""
+    pass
 
 
 def _show_session_settings():
-    """Indirection kept small so the no-selection path is easy to test."""
     return show_session_settings()
 
 
-def _busy_cursor_controller(
-        operation_started, delay_seconds=BUSY_CURSOR_DELAY_SECONDS):
-    """Return polling/cleanup callbacks for one delayed non-modal cursor."""
+def _busy_cursor_controller(operation_started,
+                            delay_seconds=BUSY_CURSOR_DELAY_SECONDS):
     busy_started = False
 
     def wait_callback():
@@ -77,12 +67,10 @@ def _busy_cursor_controller(
                 wx.EndBusyCursor()
             except Exception:
                 LOG.exception("Could not restore the Track Gloss cursor")
-
     return wait_callback, close
 
 
 def _run_api_neutral(function, wait_callback):
-    """Run API-neutral work off-thread while the owner services KiCad UI."""
     completed = threading.Event()
     outcome = {}
 
@@ -95,9 +83,8 @@ def _run_api_neutral(function, wait_callback):
         finally:
             completed.set()
 
-    thread = threading.Thread(
-        target=worker, name="KiCadTrackGlossPlanner", daemon=True)
-    thread.start()
+    threading.Thread(target=worker, name="KiCadTrackGlossPlanner",
+                     daemon=True).start()
     while not completed.wait(BUSY_CURSOR_POLL_SECONDS):
         wait_callback()
     if "error" in outcome:
@@ -118,41 +105,29 @@ def _selection_counts(board):
             counts["vias"] += 1
         else:
             counts["other"] += 1
-
-    other_collections = [
-        board.GetFootprints(), board.GetDrawings(), board.Zones()]
-    other_collections.extend(
-        footprint.Pads() for footprint in board.GetFootprints())
-    for values in other_collections:
-        for item in values:
-            if item.IsSelected():
-                counts["other"] += 1
     return counts
 
 
-def _eligible_net_names(model, eligible_keys):
-    eligible = set(eligible_keys)
-    labels = {segment.net_name or "net {}".format(segment.net_id)
-              for segment in model.segments
-              if segment_key(segment) in eligible}
-    return sorted(labels)
+def _net_names(model, keys):
+    keys = set(keys)
+    return sorted({segment.net_name or "net {}".format(segment.net_id)
+                   for segment in model.segments
+                   if segment_key(segment) in keys})
 
 
-def _append_performance_timings(report, timings, operation_started):
-    timings["total"] = (time.monotonic() - operation_started) * 1000.0
-    report.extend(["", "Performance timings:"] + [
-        "  {}: {:.3f} ms".format(
-            key.replace("_", " ").title(), value)
-        for key, value in timings.items()
-    ])
+def _board_identity(board):
+    filename = str(board.GetFileName() or "")
+    if not filename:
+        return "Unsaved board", "(not saved)"
+    path = Path(filename).resolve()
+    return path.name, str(path)
 
 
 class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
     def defaults(self):
         self.name = "KiCad Track Gloss"
         self.category = "Routing"
-        self.description = ("Gloss one or more selected track segments, "
-                            "connections, or complete nets")
+        self.description = "Gloss selected routed copper to a geometric fixed point"
         self.show_toolbar_button = True
         self.icon_file_name = os.path.join(PLUGIN_DIR, "icon_24.png")
         dark = os.path.join(PLUGIN_DIR, "icon_24_dark.png")
@@ -170,360 +145,166 @@ class KiCadTrackGlossPlugin(pcbnew.ActionPlugin):
         except Exception:
             _warning_bell()
             LOG.exception("Track gloss failed; the board was left unchanged")
-            try:
-                _show_report("KiCad Track Gloss — Error", [
-                    "UNEXPECTED ERROR",
-                    "Plugin version: " + __version__,
-                    "The operation was aborted; in-memory rollback was requested.",
-                    "",
-                    traceback.format_exc(),
-                ])
-            except Exception:
-                LOG.exception("Could not display the Track Gloss error report")
+            _show_report("KiCad Track Gloss — Error", [
+                "UNEXPECTED ERROR", "Plugin version: " + __version__,
+                "The board was left unchanged.", "", traceback.format_exc()])
         else:
             if changed is False:
                 _warning_bell()
 
     def _run(self, report, diagnostic=False):
-        operation_started = time.monotonic()
-        wait_callback, close_cursor = _busy_cursor_controller(
-            operation_started)
+        started = time.monotonic()
+        wait_callback, close_cursor = _busy_cursor_controller(started)
         try:
             return self._run_operation(
-                report, diagnostic, operation_started, wait_callback)
+                report, diagnostic, started, wait_callback)
         finally:
             close_cursor()
 
-    def _run_operation(
-            self, report, diagnostic, operation_started, wait_callback):
-        config = get_session_config()
-        operation_deadline = (
-            operation_started +
-            config.timing.interactive_total_time_budget_seconds)
-        timings = {}
-        report.append("Plugin version: " + __version__)
+    def _run_operation(self, report, diagnostic, started, wait_callback):
         board = pcbnew.GetBoard()
         if board is None:
             report.append("Result: no active PCB board.")
             return False
-        try:
-            report.append("KiCad version: " + str(pcbnew.Version()))
-        except Exception:
-            pass
-        report.append(
-            "Optimization coordinates: exact centerlines with clearance-inflated "
-            "copper polylines; active KiCad grid not used.")
-        report.append(
-            "Session policy: minimum saving {:.6f} mm; convergence to fixed "
-            "point (group passes {}); KiCad native DRC {}; time budget {:.1f} s "
-            "(planning {:.1f} s).".format(
-                config.gloss.minimum_saved_length_mm,
-                config.convergence.interactive_group_max_passes,
-                "enabled" if config.safety.use_kicad_native_drc
-                else "disabled",
-                config.timing.interactive_total_time_budget_seconds,
-                config.timing.interactive_planning_time_budget_seconds))
-        stage_started = time.monotonic()
         counts = _selection_counts(board)
-        timings["selection_scan"] = (
-            time.monotonic() - stage_started) * 1000.0
-        report.append(
-            "Selected objects: {segments} straight segment(s), {arcs} arc(s), "
-            "{vias} via(s), {other} other.".format(**counts))
         if counts["segments"] == 0:
-            raise NoTrackSelection(
-                "Select at least one straight track segment before running Track Gloss.")
+            raise NoTrackSelection()
+
+        config = get_session_config()
+        total_budget = config.timing.interactive_total_time_budget_seconds
+        operation_deadline = started + total_budget
+        # Scheduling reserve only: it is not another user budget.  It keeps a
+        # portion of the single total deadline available for the one final DRC.
+        validation_reserve = min(8.0, total_budget * 0.40)
+        planning_deadline = operation_deadline - validation_reserve
         adapter = BoardAdapter(pcbnew)
-        try:
-            stage_started = time.monotonic()
-            snapshot = adapter.snapshot(board)
-            timings["snapshot"] = (
-                time.monotonic() - stage_started) * 1000.0
-        except ValueError as error:
-            report.append("Result: selection rejected.")
-            report.append("Reason: " + str(error))
-            if diagnostic:
-                _append_performance_timings(
-                    report, timings, operation_started)
-            return False
-        report.append("Eligible straight segments: " + str(len(snapshot.eligible_keys)))
-        net_names = _eligible_net_names(snapshot.model, snapshot.eligible_keys)
-        report.append("Eligible net(s) ({}): {}".format(
-            len(net_names), ", ".join(net_names) if net_names else "none"))
-        report.append("Automatic connection expansion: {} seed(s) + {} segment(s).".format(
-            snapshot.selection_seed_count, snapshot.auto_expanded_count))
-        report.append("Native-protected segments: " +
-                      str(snapshot.native_protected_count))
-        for warning in snapshot.warnings:
-            report.append("Protection: " + warning)
-        stage_started = time.monotonic()
-        track_terminals = find_track_terminal_vertices(
-            snapshot.model, snapshot.eligible_keys)
-        pad_terminals = find_pad_terminal_targets(
-            snapshot.model, snapshot.eligible_keys)
-        timings["terminal_analysis"] = (
-            time.monotonic() - stage_started) * 1000.0
-        report.append("Sliding track-intersection terminations: " +
-                      str(len(track_terminals)))
-        report.append("Sliding pad-area terminations: " +
-                      str(len(pad_terminals)))
-        if (len(snapshot.eligible_keys) < 2 and not track_terminals and
-                not pad_terminals):
-            report.append("Result: no modification.")
-            report.append(
-                "Reason: automatic connection expansion did not find a second eligible "
-                "straight segment or a sliding track/pad termination.")
-            if diagnostic:
-                _append_performance_timings(
-                    report, timings, operation_started)
+        snapshot = adapter.snapshot(board)
+        baseline_warmup = (start_native_baseline_warmup(
+            adapter, board, timeout_seconds=total_budget)
+            if config.safety.use_kicad_native_drc else None)
+        filename, filepath = _board_identity(board)
+        nets = _net_names(snapshot.model, snapshot.eligible_keys)
+
+        report.extend([
+            "Plugin version: " + __version__,
+            "KiCad version: " + str(pcbnew.Version()),
+            "File: " + filename,
+            "Path: " + filepath,
+            "Scope: {} selected connection(s), {} net(s): {}".format(
+                len(snapshot.connection_scopes), len(nets),
+                ", ".join(nets) if nets else "none"),
+            "Policy: minimum saving {:.3f} mm; total budget {:.1f} s; "
+            "native DRC {}.".format(
+                config.gloss.minimum_saved_length_mm, total_budget,
+                "enabled" if config.safety.use_kicad_native_drc
+                else "disabled"),
+        ])
+
+        plan = _run_api_neutral(
+            lambda: plan_selected_copper(
+                snapshot.model, snapshot.eligible_keys,
+                min_gain=config.gloss.minimum_saved_length_mm,
+                deadline=planning_deadline), wait_callback)
+        if not plan.changed:
+            if baseline_warmup is not None:
+                baseline_warmup.cancel()
+            report.extend([
+                "Outcome: no modification.",
+                "Gain: 0.000000 mm.",
+                "Passes: {}; fixed point: {}.".format(
+                    plan.convergence_passes,
+                    "yes" if plan.fixed_point else "no"),
+                "DRC: not required (no candidate).",
+                "Primary reason: no shorter connected octolinear polyline "
+                "passed the exact internal geometry checks.",
+                "Total time: {:.3f} s.".format(time.monotonic() - started),
+            ])
             return False
 
-        stage_started = time.monotonic()
-        planning_deadline = min(
-            operation_deadline,
-            stage_started +
-            config.timing.interactive_planning_time_budget_seconds)
-        conservative_ladder = []
-        connection_plans = []
-        connection_plan = None
-        connection_planning_limit_reached = False
-        connection_planning_deadline = planning_deadline
-        if (len(snapshot.connection_scopes) > 1 and
-                time.monotonic() < connection_planning_deadline):
-            stage_started = time.monotonic()
-            try:
-                (connection_plans, connection_rejections,
-                 connection_planning_limit_reached) = _run_api_neutral(
-                    lambda: generate_connection_candidates(
-                        snapshot.model, snapshot.eligible_keys,
-                        snapshot.connection_scopes, GlossResult(),
-                        min_gain=config.gloss.minimum_saved_length_mm,
-                        max_passes=None,
-                        group_max_passes=(
-                            config.convergence.interactive_group_max_passes),
-                        collect_statistics=diagnostic,
-                        planning_deadline=connection_planning_deadline,
-                        cancellation_grace_seconds=(
-                            config.timing.interactive_cancellation_grace_seconds)),
-                    wait_callback)
-                (connection_plan, _compatible_connection_plans,
-                 connection_composition_rejections) = \
-                    compose_compatible_connection_plans(
-                        snapshot.model, snapshot.eligible_keys,
-                        connection_plans)
-                connection_rejections.extend(
-                    connection_composition_rejections)
-            except Exception:
-                LOG.exception("Could not build connection-local candidates")
-                connection_plans = []
-                connection_rejections = []
-                connection_plan = None
-            timings["connection_planning"] = (
-                time.monotonic() - stage_started) * 1000.0
-            if diagnostic and connection_rejections:
-                report.append(
-                    "Connection-local planning rejected {} candidate(s) "
-                    "internally.".format(len(connection_rejections)))
-
-        global_plan = GlossResult()
-        if time.monotonic() < planning_deadline:
-            stage_started = time.monotonic()
-            global_plan = _run_api_neutral(
-                lambda: generate_converged_plan(
-                    snapshot.model, snapshot.eligible_keys,
-                    max_passes=None,
-                    return_partial_on_limit=True,
-                    group_max_passes=(
-                        config.convergence.interactive_group_max_passes),
-                    min_gain=config.gloss.minimum_saved_length_mm,
-                    collect_statistics=diagnostic,
-                    parallel=True,
-                    deadline=planning_deadline,
-                    conservative_ladder=conservative_ladder,
-                    cancellation_grace_seconds=(
-                        config.timing.interactive_cancellation_grace_seconds)),
-                wait_callback)
-            timings["planning"] = (
-                time.monotonic() - stage_started) * 1000.0
-
-        planning_candidates = [global_plan]
-        if connection_plan is not None and connection_plan.changed:
-            planning_candidates.append(connection_plan)
-        planning_candidates.extend(
-            plan for plan in conservative_ladder if plan.changed)
-        planning_candidates = list(rank_candidate_plans(planning_candidates))
-        if diagnostic and len(snapshot.connection_scopes) == 1:
-            report.append(
-                "Single-connection converged candidates: {}.".format(
-                    len(planning_candidates)))
-        best = planning_candidates[0]
-        aggressive_plan = best
-        report.append("Convergence passes: " + str(best.convergence_passes))
-        report.append("Fixed point reached: " +
-                      ("yes" if best.fixed_point else "no"))
-        report.append("Connected chains considered: " +
-                      str(best.chains_considered))
-        for warning in best.warnings:
-            if "time budget" in warning.lower():
-                report.append("Planning limit: " + warning)
-        if not best.changed:
-            if diagnostic:
-                append_search_statistics(
-                    report, best.search_counts, best.blocking_nets)
-                _append_performance_timings(
-                    report, timings, operation_started)
-            if not best.fixed_point:
-                report.append("Result: interactive planning time budget reached.")
-                report.append(
-                    "No fully composed improvement was available before the deadline; "
-                    "the current board was left unchanged.")
-            else:
-                report.append("Result: no safe improvement found.")
-                reasons = [warning for warning in best.warnings
-                           if "time budget" not in warning.lower()]
-                if reasons:
-                    report.extend("Planning reason: " + reason
-                                  for reason in reasons)
-                else:
-                    report.append(
-                        "Planning reason: no improving candidate passed the "
-                        "engine's exact geometry and connectivity gates.")
+        remaining = operation_deadline - time.monotonic()
+        if config.safety.use_kicad_native_drc and remaining <= 0.0:
+            report.extend([
+                "Outcome: no modification.",
+                "Gain available: {:.6f} mm.".format(plan.saved_mm),
+                "DRC: not run; total budget exhausted.",
+                "Primary reason: the candidate could not be validated inside "
+                "the total time budget.",
+            ])
             return False
-        stage_started = time.monotonic()
-        drc_budget = operation_deadline - time.monotonic()
-        if drc_budget <= 0.0:
-            report.append("Result: interactive total time budget reached.")
-            report.append(
-                "The candidate was not sent to KiCad DRC and the current board "
-                "was left unchanged.")
-            return False
-        force_native = config.safety.use_kicad_native_drc
-        skip_native = not config.safety.use_kicad_native_drc
-        conservative = next((
-            plan for plan in rank_candidate_plans(conservative_ladder)
-            if plan.changed and
-            plan_identity(plan) != plan_identity(global_plan)), None)
-        decision_continuation = None
-        if len(snapshot.connection_scopes) == 1:
-            decision_continuation = lambda base: _run_api_neutral(
-                lambda: generate_plan_continuations(
-                    snapshot.model, snapshot.eligible_keys, base,
-                    min_gain=config.gloss.minimum_saved_length_mm,
-                    group_max_passes=(
-                        config.convergence.interactive_group_max_passes),
-                    collect_statistics=diagnostic,
-                    planning_deadline=operation_deadline,
-                    cancellation_grace_seconds=(
-                        config.timing.interactive_cancellation_grace_seconds)),
-                wait_callback)
-        decision = _maximize_safe_native_candidates(
-            adapter, board, snapshot.model, snapshot.eligible_keys,
-            planning_candidates, conservative_plan=conservative,
-            connection_plans=connection_plans,
-            force_native=force_native, skip_native=skip_native,
-            operation_deadline=operation_deadline,
-            wait_callback=wait_callback,
-            continuation_factory=decision_continuation)
-        best = decision.plan or best
-        native = decision.native
-        fallback_used = decision.fallback_used
-        partial_subset_used = decision.salvage_used
-        partial_subset_attempts = decision.salvage_attempts
-        partial_subset_deadline = (
-            decision.salvage_deadline or connection_planning_limit_reached)
-        partial_connections_retained = decision.connections_retained
-        partial_connections_total = decision.connections_planned
-        primary_native = decision.primary_native or native
-        timings["native_drc_gate"] = (
-            time.monotonic() - stage_started) * 1000.0
-        if fallback_used or partial_subset_used:
-            for key, value in primary_native.timings_ms.items():
-                timings["native_primary_" + key] = value
-        for key, value in native.timings_ms.items():
-            timings["native_" + key] = value
-        if ("unconnected_items" in native.increases or
-                native.before.get("unconnected_items", 0) or
-                native.after.get("unconnected_items", 0)):
-            report.append(
-                "Native unconnected items: {} -> {}.".format(
-                    native.before.get("unconnected_items", 0),
-                    native.after.get("unconnected_items", 0)))
+        if baseline_warmup is not None:
+            baseline_warmup.wait(
+                timeout_seconds=min(0.25, max(0.0, remaining)),
+                wait_callback=wait_callback)
+            remaining = operation_deadline - time.monotonic()
+        native = adapter.validate_plan(
+            board, plan,
+            force_native=config.safety.use_kicad_native_drc,
+            skip_native=not config.safety.use_kicad_native_drc,
+            timeout_seconds=(remaining if
+                             config.safety.use_kicad_native_drc else None),
+            wait_callback=wait_callback)
+        corrective_drc = False
+        if (config.safety.use_kicad_native_drc and not native.allowed and
+                native.finding_points):
+            remainder = localized_drc_remainder(
+                snapshot.model, snapshot.eligible_keys, plan,
+                native.finding_points)
+            remaining = operation_deadline - time.monotonic()
+            if remainder is not None and remaining > 0.0:
+                corrected_native = adapter.validate_plan(
+                    board, remainder, force_native=True,
+                    timeout_seconds=remaining, wait_callback=wait_callback)
+                if corrected_native.allowed:
+                    plan, native = remainder, corrected_native
+                    corrective_drc = True
         if not native.allowed:
-            if native.validation_mode == "native_timeout":
-                report.append("Native KiCad DRC gate: interactive time budget reached.")
-            elif native.error:
-                report.append("Native KiCad DRC gate: validation infrastructure failed.")
-            else:
-                report.append("Native KiCad DRC gate: plan rejected.")
-            if native.increases:
-                report.append("New native DRC findings: " + ", ".join(
-                    "{} +{}".format(key, value)
-                    for key, value in native.increases.items()))
-            if native.error:
-                report.append("Native DRC error: " + native.error)
-            if diagnostic:
-                _append_performance_timings(
-                    report, timings, operation_started)
-            report.append("Result: no safe improvement found.")
+            increases = ", ".join(
+                "{} +{}".format(key, value)
+                for key, value in native.increases.items())
+            reason = native.error or increases or "native validation rejected the plan"
+            report.extend([
+                "Outcome: no modification.",
+                "Gain available: {:.6f} mm.".format(plan.saved_mm),
+                "Passes: {}; fixed point: {}.".format(
+                    plan.convergence_passes,
+                    "yes" if plan.fixed_point else "no"),
+                "DRC: rejected.",
+                "Primary reason: " + reason + ".",
+                "Total time: {:.3f} s.".format(time.monotonic() - started),
+            ])
             return False
-        if fallback_used:
-            report.append(
-                "Candidate ladder: highest-quality plan rejected; alternate "
-                "validated candidate accepted by native KiCad DRC.")
-        if partial_subset_used:
-            retained_nets = plan_net_ids(snapshot.model, best)
-            total_nets = plan_net_ids(snapshot.model, aggressive_plan)
-            report.append(
-                "Native DRC salvage: retained {} of {} independently planned "
-                "local unit(s), spanning {} of {} modified net(s), after {} "
-                "candidate validation(s).".format(
-                    partial_connections_retained,
-                    partial_connections_total,
-                    len(retained_nets), len(total_nets),
-                    partial_subset_attempts))
-            omitted_ids = set(total_nets) - set(retained_nets)
-            omitted_names = sorted({
-                segment.net_name or "net {}".format(segment.net_id)
-                for segment in snapshot.model.segments
-                if segment.net_id in omitted_ids})
-            if omitted_names:
-                report.append(
-                    "Not retained (rejected or unvalidated before the time "
-                    "budget): " + ", ".join(omitted_names))
-            if partial_subset_deadline:
-                report.append(
-                    "Native DRC salvage stopped at the interactive time "
-                    "budget; the best already validated subset was retained.")
-        if native.validation_mode == "geometric_removal_fast_path":
-            report.append(
-                "Safety gate: proven removal-only geometry; native DRC not required.")
-        elif native.validation_mode == "native_drc_disabled":
-            report.append(
-                "Safety gate: KiCad native DRC disabled by session policy.")
-        else:
-            report.append("Native KiCad DRC gate: no category increase.")
-        report.append("Chosen plan: remove {} segment(s), add {} segment(s).".format(
-            len(best.remove_keys), len(best.additions)))
-        report.append("Copper length saved: {:.3f} mm.".format(best.saved_mm))
-        report.append("Non-octolinear segments corrected: {}.".format(
-            best.angle_corrections))
-        stage_started = time.monotonic()
-        adapter.apply(board, best, rollback_on_error=True)
-        timings["apply"] = (time.monotonic() - stage_started) * 1000.0
-        if diagnostic:
-            report.append(
-                "Post-apply copper readback: requested plan matched.")
+
+        adapter.apply(board, plan, rollback_on_error=True)
         board.SetModified()
         pcbnew.Refresh()
-        timings["total"] = (
-            time.monotonic() - operation_started) * 1000.0
+        report.extend([
+            "Outcome: GLOSS APPLIED.",
+            "Gain: {:.6f} mm.".format(plan.saved_mm),
+            "Segments: {} removed, {} added.".format(
+                len(plan.remove_keys), len(plan.additions)),
+            "Passes: {}; fixed point: {}.".format(
+                plan.convergence_passes,
+                "yes" if plan.fixed_point else "no"),
+            "DRC: {}.".format(
+                "disabled by session policy" if
+                native.validation_mode == "native_drc_disabled" else
+                "validated globally after one localized correction; no "
+                "category increase" if corrective_drc else
+                "validated globally; no category increase"),
+            "Total time: {:.3f} s.".format(time.monotonic() - started),
+        ])
         if diagnostic:
             summary = summarize_plan(
-                snapshot.model, snapshot.eligible_keys, best)
-            summary["timings_ms"] = timings
-            summary["native_baseline_cached"] = native.baseline_cached
-            summary["validation_mode"] = native.validation_mode
-            append_plan_statistics(report, summary)
+                snapshot.model, snapshot.eligible_keys, plan)
+            summary.update({
+                "file_name": filename, "file_path": filepath,
+                "validation_mode": native.validation_mode,
+                "corrective_drc": corrective_drc,
+                "total_seconds": time.monotonic() - started,
+            })
+            report.extend(["", "Machine-readable JSON:"])
+            report.extend(json.dumps(
+                summary, indent=2, sort_keys=True).splitlines())
         return True
 
 
@@ -531,38 +312,23 @@ class KiCadTrackGlossDiagnosticPlugin(KiCadTrackGlossPlugin):
     def defaults(self):
         self.name = "KiCad Track Gloss — Diagnostic"
         self.category = "Routing"
-        self.description = ("Run Track Gloss and display a detailed diagnostic "
-                            "report, including no-op reasons")
+        self.description = "Run Track Gloss and display its concise diagnostic"
         self.show_toolbar_button = False
         self.icon_file_name = os.path.join(PLUGIN_DIR, "icon_24.png")
-        dark = os.path.join(PLUGIN_DIR, "icon_24_dark.png")
-        if os.path.exists(dark):
-            self.dark_icon_file_name = dark
 
     def Run(self):
         report = ["KiCad Track Gloss diagnostic", ""]
         try:
             changed = self._run(report, diagnostic=True)
         except NoTrackSelection:
-            try:
-                _show_session_settings()
-            except Exception:
-                LOG.exception("Could not display Track Gloss session settings")
+            _show_session_settings()
             return
         except Exception:
             _warning_bell()
             LOG.exception("Track gloss diagnostic run failed")
-            report.extend([
-                "",
-                "UNEXPECTED ERROR",
-                "The operation was aborted; in-memory rollback was requested.",
-                "",
-                traceback.format_exc(),
-            ])
+            report.extend(["", "UNEXPECTED ERROR", "The board was left unchanged.",
+                           "", traceback.format_exc()])
         else:
             if changed is False:
                 _warning_bell()
-        try:
-            _show_diagnostic_report("KiCad Track Gloss — Diagnostic", report)
-        except Exception:
-            LOG.exception("Could not display the Track Gloss diagnostic report")
+        _show_diagnostic_report("KiCad Track Gloss — Diagnostic", report)

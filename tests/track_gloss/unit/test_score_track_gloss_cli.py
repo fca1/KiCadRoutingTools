@@ -51,12 +51,10 @@ def test_explicit_project_can_grade_a_differently_named_candidate():
 
 def test_stdout_has_json_then_place_route_loop_score_line():
     output = CLI.score_stdout({"score": 87.5, "changed": True})
-    score_json_line, legacy_json_line, score_line = output.splitlines()
+    score_json_line, score_line = output.splitlines()
     expected = {
         "changed": True, "score": 87.5}
     assert json.loads(score_json_line.removeprefix("SCORE_JSON=")) == expected
-    assert json.loads(
-        legacy_json_line.removeprefix("GLOSS_SCORE_JSON=")) == expected
     assert score_line == "SCORE=87.500000000"
 
 
@@ -111,10 +109,9 @@ def test_scope_respects_only_native_protection_keys():
         records, ["ALL"], {"native": "generated"}) == {"manual"}
 
 
-def test_cli_exposes_convergence_pass_limit_and_trace():
+def test_cli_exposes_fixed_point_trace():
     args = CLI._parser().parse_args([
-        "--max-passes", "7", "--trace-passes", "candidate.kicad_pcb"])
-    assert args.max_passes == 7
+        "--trace-passes", "candidate.kicad_pcb"])
     assert args.trace_passes
 
 
@@ -128,14 +125,6 @@ def test_cli_exposes_json_output_path():
     args = CLI._parser().parse_args([
         "--json-out", "result.json", "candidate.kicad_pcb"])
     assert args.json_out == "result.json"
-
-
-def test_cli_default_pass_limit_comes_from_internal_policy():
-    document = json.loads((
-        ROOT / "kicad_track_gloss" / "internal_config.json").read_text(
-            encoding="utf-8"))
-    args = CLI._parser().parse_args(["candidate.kicad_pcb"])
-    assert args.max_passes == document["convergence"]["cli_max_passes"]
 
 
 def test_cli_minimum_saved_length_comes_from_policy_and_is_overridable():

@@ -15,12 +15,6 @@ _HELP = {
     "total_budget": (
         "Maximum interactive planning and KiCad DRC budget in seconds. A plan "
         "is never applied if its required validation did not finish."),
-    "planning_budget": (
-        "Maximum seconds reserved for geometric candidate search. This value "
-        "cannot exceed the total interactive budget."),
-    "grace": (
-        "Extra seconds allowed for worker processes to stop cleanly after a "
-        "planning deadline."),
     "native_drc": (
         "Run KiCad's native DRC for every selected scope, whether it contains "
         "one connection or multiple nets. Unchecking this option skips the "
@@ -73,12 +67,6 @@ def show_session_settings(parent=None):
     total_budget = _double_control(
         dialog, policy.timing.interactive_total_time_budget_seconds,
         0.5, 600.0, 0.5, 1)
-    planning_budget = _double_control(
-        dialog, policy.timing.interactive_planning_time_budget_seconds,
-        0.1, 600.0, 0.5, 1)
-    grace = _double_control(
-        dialog, policy.timing.interactive_cancellation_grace_seconds,
-        0.0, 30.0, 0.1, 1)
     native_drc = wx.CheckBox(dialog, label="Use KiCad native DRC")
     native_drc.SetValue(policy.safety.use_kicad_native_drc)
 
@@ -86,9 +74,6 @@ def show_session_settings(parent=None):
     add_row("Minimum saved length (mm)", minimum, _HELP["minimum"])
     add_row("Total interactive budget (s)", total_budget,
             _HELP["total_budget"])
-    add_row("Planning budget (s)", planning_budget,
-            _HELP["planning_budget"])
-    add_row("Worker cancellation grace (s)", grace, _HELP["grace"])
     outer.Add(grid, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 12)
 
     note = wx.StaticText(
@@ -112,11 +97,7 @@ def show_session_settings(parent=None):
         try:
             update_session_config(
                 minimum_saved_length_mm=minimum.GetValue(),
-                interactive_group_max_passes=(
-                    policy.convergence.interactive_group_max_passes),
                 interactive_total_time_budget_seconds=total_budget.GetValue(),
-                interactive_planning_time_budget_seconds=planning_budget.GetValue(),
-                interactive_cancellation_grace_seconds=grace.GetValue(),
                 use_kicad_native_drc=native_drc.GetValue())
         except ValueError as error:
             warning = wx.MessageDialog(

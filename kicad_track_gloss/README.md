@@ -1,58 +1,21 @@
-# KiCad Track Gloss
+# KiCad Track Gloss 2.0 — Real Spirit
 
-KiCad Track Gloss is a KiCad 10 ActionPlugin for shortening and simplifying
-existing PCB tracks. Select one or more straight segments and run the action.
-The plugin automatically expands the selected connections and treats each
-routed chain as a string pulled taut between its electrical terminations. It
-repeatedly contracts the complete path against inflated copper obstacles,
-reconstructs an exact 0/45/90-degree track, validates the result, and applies
-it to the current board as one Undo operation.
+Requires KiCad 10.0 or newer.
 
-Successful operations are silent and never save the board. Use KiCad Undo to
-reject a result. A valid no-op plays KiCad's standard warning sound once.
+The normal action glosses selected straight-track connections in place and is
+silent on success. The diagnostic action runs the same engine and reports the
+file name and absolute path, scope, outcome, gain, fixed-point state, total
+time, final DRC state, and one concrete primary reason. Advanced numeric data
+is available in its JSON tab.
 
-## Actions
+Run either action without a selected straight segment to edit the three session
+settings: native DRC, minimum saved length (default 0.2 mm), and total time
+budget (default 20 s). No planning-budget or worker-grace setting exists.
 
-- **KiCad Track Gloss** performs the normal one-click operation.
-- **KiCad Track Gloss - Diagnostic** performs the same operation and displays
-  Result, Details, and JSON tabs with copy actions.
+The algorithm contracts the routed polyline against clearance obstacles,
+represents round contacts with clean octolinear polygons, reconstructs 0/45/90
+copper, and repeats to a fixed point. T branches slide on exact collinear rails;
+non-collinear nodes remain fixed. Multi-net passes retain the best complete
+incumbent when time expires.
 
-Run either action without a selected straight segment to edit in-memory session
-settings. The first setting controls native KiCad DRC for both single-
-connection and multi-net selections: disabling it is substantially faster,
-but removes that native before/after safety check. The packaged default is
-enabled.
-
-Native validation uses private temporary board copies, refills zones, and
-compares KiCad DRC reports before and after the candidate. This can add seconds
-even when geometric planning is fast. It neither saves nor modifies the live
-board.
-
-For larger selections, every expanded connection is planned through the same
-workflow as a one-segment selection. The best compatible local composition is
-ranked with the global plan. If native DRC rejects the leading candidates, the
-plugin retains the best connection batches approved before the session time
-budget expires.
-
-## Documentation
-
-The complete documentation is maintained in the repository:
-
-- [Plugin usage](../docs/plugin-usage.md)
-- [CLI](../docs/cli.md)
-- [Configuration](../docs/configuration.md)
-- [Output contracts](../docs/output-contracts.md)
-- [Safety and DRC](../docs/safety-and-drc.md)
-- [Architecture](../docs/architecture.md)
-
-Online source and documentation:
-<https://github.com/fca1/KiCadRoutingTools/tree/codex/kicad-track-gloss>
-
-## Provenance
-
-This standalone plugin is inspired by and reusing part of DrAndyHaas's code
-from [KiCadRoutingTools](https://github.com/drandyhaas/KiCadRoutingTools).
-Original MIT notices for reused and adapted material are retained. Standalone
-integration and subsequent modifications were produced with ChatGPT/Codex
-(OpenAI) at the project owner's direction. The project is maintained by Frantz.
-See `NOTICE` and `LICENSE`.
+The plugin never saves the board. A successful operation is one Undo step.

@@ -23,20 +23,6 @@ import types
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _internal_cli_max_passes():
-    """Read the CLI default without importing the GUI plugin package."""
-    path = ROOT / "kicad_track_gloss" / "internal_config.json"
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-        value = document["convergence"]["cli_max_passes"]
-    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
-        raise RuntimeError(
-            "cannot read Track Gloss internal CLI policy: {}".format(error))
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError("convergence.cli_max_passes must be at least one")
-    return value
-
-
 def _internal_cli_time_budget():
     """Return the optional offline limit; null deliberately means unlimited."""
     path = ROOT / "kicad_track_gloss" / "internal_config.json"
@@ -88,9 +74,6 @@ def _parser():
         "--place-route-loop", action="store_true",
         help="consume the three positional paths appended by --accept-cmd")
     parser.add_argument(
-        "--no-parallel", action="store_true",
-        help="disable independent net/layer worker processes")
-    parser.add_argument(
         "--no-native-drc", action="store_true",
         help=("skip KiCad native DRC validation, matching the disabled "
               "plugin safety option"))
@@ -112,9 +95,6 @@ def _parser():
     parser.add_argument(
         "--scope-file", metavar="SCOPE.json",
         help='JSON manifest containing {"scopes":["net:VCC", ...]}')
-    parser.add_argument(
-        "--max-passes", type=int, default=_internal_cli_max_passes(), metavar="N",
-        help="maximum changed convergence passes; default from internal policy")
     parser.add_argument(
         "--time-budget", type=float, default=_internal_cli_time_budget(),
         metavar="SECONDS",
@@ -160,13 +140,9 @@ def resolve_board_project(board_or_project, explicit_project=None):
 
 
 def score_stdout(payload):
-    """Stable machine output; the final line is the accept-cmd contract.
-
-    ``GLOSS_SCORE_JSON`` remains as a compatibility alias for consumers of
-    releases before 0.3.39. Both prefixes carry the exact same document.
-    """
+    """Stable machine output; the final line is the accept-cmd contract."""
     document = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return ("SCORE_JSON=" + document + "\nGLOSS_SCORE_JSON=" + document +
+    return ("SCORE_JSON=" + document +
             "\nSCORE={:.9f}".format(payload["score"]))
 
 
@@ -286,8 +262,7 @@ def _bootstrap_engine():
     package = types.ModuleType("kicad_track_gloss")
     package.__path__ = [str(ROOT / "kicad_track_gloss")]
     sys.modules["kicad_track_gloss"] = package
-    from kicad_track_gloss.engine import (
-        generate_converged_plan)
+    from kicad_track_gloss.engine.real_spirit import plan_selected_copper
     from kicad_track_gloss.configuration import CONFIG
     from kicad_track_gloss.engine.geometry import length
     from kicad_track_gloss.engine.model import segment_key
@@ -296,7 +271,7 @@ def _bootstrap_engine():
     from kicad_track_gloss.kicad.types import is_straight_track
     from kicad_track_gloss.version import __version__
 
-    return (pcbnew, BoardAdapter, generate_converged_plan,
+    return (pcbnew, BoardAdapter, plan_selected_copper,
             length, segment_key,
             protected_track_keys, is_straight_track, __version__, CONFIG)
 
@@ -319,22 +294,16 @@ def _save_output(pcbnew, board, input_path, output_path, force=False):
     return output
 
 
-def evaluate(board_path, project_path=None, parallel=True, output_path=None,
-             force=False, max_passes=None, scopes=None, pass_observer=None,
+def evaluate(board_path, project_path=None, output_path=None,
+             force=False, scopes=None, pass_observer=None,
              time_budget_seconds=None, minimum_saved_length_mm=None,
              use_native_drc=True):
-    (pcbnew, BoardAdapter, generate_converged_plan, length, segment_key,
+    (pcbnew, BoardAdapter, plan_selected_copper, length, segment_key,
      protected_track_keys, is_straight_track,
      version, config) = _bootstrap_engine()
-    from kicad_track_gloss.engine import (
-        compose_compatible_connection_plans, generate_connection_candidates,
-        generate_plan_continuations,
-        plan_identity, rank_candidate_plans)
-    from kicad_track_gloss.engine.model import GlossResult
-    from kicad_track_gloss.kicad.native_salvage import (
-        maximize_safe_native_candidates)
-    if max_passes is None:
-        max_passes = config.convergence.cli_max_passes
+    from kicad_track_gloss.kicad.native_validation import (
+        NativeDrcResult, start_native_baseline_warmup)
+    from kicad_track_gloss.engine.real_spirit import localized_drc_remainder
     if time_budget_seconds is None:
         time_budget_seconds = config.timing.cli_total_time_budget_seconds
     if minimum_saved_length_mm is None:
@@ -354,9 +323,13 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
     operation_deadline = (
         None if time_budget_seconds is None else
         operation_started + float(time_budget_seconds))
-    planning_deadline = (
-        None if time_budget_seconds is None else
-        operation_started + float(time_budget_seconds) * 0.5)
+    validation_reserve = (
+        0.0 if time_budget_seconds is None else
+        min(0.5, float(time_budget_seconds) * 0.05)
+        if not use_native_drc else
+        min(20.0, float(time_budget_seconds) * 0.40))
+    planning_deadline = (None if operation_deadline is None else
+                         operation_deadline - validation_reserve)
     with prepared_board(board_path, project_path) as (load_path, used_project):
         stage_started = time.monotonic()
         board = pcbnew.LoadBoard(str(load_path))
@@ -387,111 +360,66 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
         timings_ms["scope"] = (time.monotonic() - stage_started) * 1000.0
         if not eligible:
             raise ValueError("scope contains no eligible track after protection")
-        conservative_ladder = []
-        connection_plans = []
-        single_connection_units = []
-        connection_plan = None
-        # The first half of a bounded run produces both the broad plan and
-        # independently validatable connections.  The second half belongs to
-        # native DRC and anytime salvage, which can always return its incumbent.
-        connection_planning_deadline = planning_deadline
-        if (len(connection_scopes) > 1 and
-                (connection_planning_deadline is None or
-                 time.monotonic() < connection_planning_deadline)):
-            stage_started = time.monotonic()
-            (connection_plans, _connection_rejections,
-             _connection_deadline) = generate_connection_candidates(
-                initial.model, eligible, connection_scopes, GlossResult(),
-                min_gain=minimum_saved_length_mm,
-                max_passes=max_passes,
-                group_max_passes=max_passes,
-                collect_statistics=False,
-                planning_deadline=connection_planning_deadline,
-                cancellation_grace_seconds=(
-                    config.timing.interactive_cancellation_grace_seconds))
-            (connection_plan, _compatible_plans,
-             _composition_rejections) = compose_compatible_connection_plans(
-                initial.model, eligible, connection_plans)
-            timings_ms["planning_connections"] = (
-                time.monotonic() - stage_started) * 1000.0
-        global_plan = GlossResult()
-        if (planning_deadline is None or
-                time.monotonic() < planning_deadline):
-            stage_started = time.monotonic()
-            global_plan = generate_converged_plan(
-                initial.model, eligible, max_passes=max_passes,
-                min_gain=minimum_saved_length_mm,
-                parallel=parallel,
-                pass_observer=pass_observer, deadline=planning_deadline,
-                conservative_ladder=conservative_ladder,
-                cancellation_grace_seconds=(
-                    config.timing.interactive_cancellation_grace_seconds))
-            timings_ms["planning_primary"] = (
-                time.monotonic() - stage_started) * 1000.0
-        planning_candidates = [global_plan]
-        if connection_plan is not None and connection_plan.changed:
-            planning_candidates.append(connection_plan)
-        planning_candidates.extend(
-            plan for plan in conservative_ladder if plan.changed)
-        planning_candidates = list(rank_candidate_plans(planning_candidates))
-        best = planning_candidates[0]
+        warmup = (start_native_baseline_warmup(
+            adapter, board, timeout_seconds=time_budget_seconds)
+            if use_native_drc else None)
+        stage_started = time.monotonic()
+        best = plan_selected_copper(
+            initial.model, eligible, min_gain=minimum_saved_length_mm,
+            deadline=planning_deadline)
+        timings_ms["planning"] = (
+            time.monotonic() - stage_started) * 1000.0
+        if pass_observer is not None:
+            pass_observer({
+                "pass": best.convergence_passes,
+                "fixed_point": best.fixed_point,
+                "saved_mm": best.saved_mm,
+                "changed": best.changed,
+            })
+        if not best.changed and warmup is not None:
+            warmup.cancel()
         native = None
         applied = False
-        fallback_used = False
-        fallback_plan_cached = bool(
-            conservative_ladder and conservative_ladder[0].changed)
-        connection_salvage_used = False
-        connection_salvage_attempts = 0
-        connections_retained = 0
-        connections_planned = 0
+        corrective_drc = False
         if best.changed:
             stage_started = time.monotonic()
-            conservative = next((
-                plan for plan in rank_candidate_plans(conservative_ladder)
-                if plan.changed and
-                plan_identity(plan) != plan_identity(global_plan)), None)
-            decision = maximize_safe_native_candidates(
-                adapter, board, initial.model, eligible,
-                planning_candidates, conservative_plan=conservative,
-                connection_plans=connection_plans,
-                force_native=False, skip_native=not use_native_drc,
-                operation_deadline=operation_deadline,
-                wait_callback=None,
-                continuation_factory=(
-                    (lambda base: generate_plan_continuations(
-                        initial.model, eligible, base,
-                        min_gain=minimum_saved_length_mm,
-                        group_max_passes=max_passes,
-                        collect_statistics=False,
-                        planning_deadline=operation_deadline,
-                        cancellation_grace_seconds=(
-                            config.timing.interactive_cancellation_grace_seconds)))
-                    if len(connection_scopes) == 1 else None))
-            timings_ms["native_candidate_search"] = (
-                time.monotonic() - stage_started) * 1000.0
-            if decision.initial_portfolio:
-                timings_ms["native_portfolio"] = decision.initial_validation_ms
+            if not use_native_drc:
+                native = adapter.validate_plan(
+                    board, best, skip_native=True)
             else:
-                timings_ms["native_primary"] = decision.initial_validation_ms
-            if decision.followup_validations:
-                timings_ms["native_candidate_followups"] = (
-                    decision.followup_validation_ms)
-            if decision.salvage_attempts:
-                timings_ms["native_connection_salvage"] = decision.salvage_ms
-            best = decision.plan or best
-            native = decision.native
-            fallback_used = decision.fallback_used
-            connection_salvage_used = decision.salvage_used
-            connection_salvage_attempts = decision.salvage_attempts
-            connections_retained = decision.connections_retained
-            connections_planned = decision.connections_planned
-        if (best.changed and native is not None and
-                not native.allowed and native.error):
-            raise RuntimeError(
-                "native DRC validation failed: {}".format(native.error))
-        if best.changed and native.allowed:
-            adapter.apply(board, best, rollback_on_error=True)
-            applied = True
+                remaining = (None if operation_deadline is None else
+                             operation_deadline - time.monotonic())
+                if remaining is not None and remaining <= 0.0:
+                    native = NativeDrcResult(
+                        False, error="total time budget reached",
+                        validation_mode="native_timeout")
+                else:
+                    warmup.wait(timeout_seconds=(
+                        None if remaining is None else min(0.25, remaining)))
+                    remaining = (None if operation_deadline is None else
+                                 operation_deadline - time.monotonic())
+                    native = adapter.validate_plan(
+                        board, best, force_native=True,
+                        timeout_seconds=remaining)
+                    if not native.allowed and native.finding_points:
+                        remainder = localized_drc_remainder(
+                            initial.model, eligible, best,
+                            native.finding_points)
+                        remaining = (None if operation_deadline is None else
+                                     operation_deadline - time.monotonic())
+                        if (remainder is not None and
+                                (remaining is None or remaining > 0.0)):
+                            corrected = adapter.validate_plan(
+                                board, remainder, force_native=True,
+                                timeout_seconds=remaining)
+                            if corrected.allowed:
+                                best, native = remainder, corrected
+                                corrective_drc = True
+            timings_ms["native_drc"] = (
+                time.monotonic() - stage_started) * 1000.0
+            if native.allowed:
+                adapter.apply(board, best, rollback_on_error=True)
+                applied = True
 
         planned_saved_mm = best.saved_mm
         planned_removed = len(best.remove_keys)
@@ -531,7 +459,6 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             "eligible_tracks": len(eligible),
             "native_protected_tracks": len(protected_expanded),
             "convergence_passes": best.convergence_passes,
-            "max_passes": max_passes,
             "time_budget_seconds": time_budget_seconds,
             "minimum_saved_length_mm": minimum_saved_length_mm,
             "fixed_point": best.fixed_point,
@@ -547,13 +474,9 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
             "segments_after": after_segments,
             "segments_saved": before_segments - after_segments,
             "changed": applied,
-            "candidate_ladder_fallback": fallback_used,
-            "candidate_ladder_cached": fallback_plan_cached,
-            "connection_salvage_used": connection_salvage_used,
-            "connection_salvage_attempts": connection_salvage_attempts,
-            "single_connection_units": len(single_connection_units),
-            "connections_retained": connections_retained,
-            "connections_planned": connections_planned,
+            "single_connection_units": len(connection_scopes),
+            "connections_planned": len(connection_scopes),
+            "corrective_drc": corrective_drc,
             "native_drc_gate": (
                 "passed" if native and native.allowed else
                 "rejected" if native else "not_needed"),
@@ -579,8 +502,6 @@ def evaluate(board_path, project_path=None, parallel=True, output_path=None,
 def main(argv=None):
     args = _parser().parse_args(argv)
     try:
-        if args.max_passes < 1:
-            raise ValueError("--max-passes must be at least one")
         if (args.time_budget is not None and
                 (not math.isfinite(args.time_budget) or
                  args.time_budget <= 0.0)):
@@ -605,9 +526,9 @@ def main(argv=None):
                     file=sys.stderr, flush=True)
             pass_observer = emit_pass
         payload = evaluate(
-            board, project, parallel=not args.no_parallel,
+            board, project,
             output_path=args.output, force=args.force, scopes=scopes,
-            max_passes=args.max_passes, pass_observer=pass_observer,
+            pass_observer=pass_observer,
             time_budget_seconds=args.time_budget,
             minimum_saved_length_mm=args.minimum_saved_length_mm,
             use_native_drc=not args.no_native_drc)

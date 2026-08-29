@@ -19,11 +19,7 @@ package = types.ModuleType("kicad_track_gloss")
 package.__path__ = [str(ROOT / "kicad_track_gloss")]
 sys.modules["kicad_track_gloss"] = package
 
-from kicad_track_gloss.engine import (  # noqa: E402
-    find_pad_terminal_targets,
-    find_track_terminal_targets,
-    generate_converged_plan,
-)
+from kicad_track_gloss.engine import plan_selected_copper  # noqa: E402
 from kicad_track_gloss.configuration import CONFIG  # noqa: E402
 from kicad_track_gloss.engine.model import segment_key  # noqa: E402
 from kicad_track_gloss.kicad import BoardAdapter  # noqa: E402
@@ -62,9 +58,7 @@ def main():
     warnings = []
     eligible, expanded, protected = adapter.expand_eligible_keys(
         board, records, set(args.uuid), warnings)
-    targets = find_track_terminal_targets(snapshot.model, eligible)
-    pad_targets = find_pad_terminal_targets(snapshot.model, eligible)
-    plan = generate_converged_plan(
+    plan = plan_selected_copper(
         snapshot.model, eligible,
         min_gain=CONFIG.gloss.minimum_saved_length_mm)
 
@@ -78,14 +72,6 @@ def main():
     print("native-protected:", len(protected), sorted(protected))
     print("eligible:", len(eligible), sorted(eligible))
     print("warnings:", warnings)
-    print("sliding terminals:", len(targets))
-    for terminal, tracks in sorted(targets.items()):
-        print(" ", terminal, "->", [segment_key(track) for track in tracks])
-    print("sliding pad areas:", len(pad_targets))
-    for terminal, regions in sorted(pad_targets.items()):
-        print(" ", terminal, "->", [
-            (region.shape, region.x, region.y, region.width, region.height)
-            for region in regions])
     print("converged plan: changed=", plan.changed,
           "fixed_point=", plan.fixed_point,
           "passes=", plan.convergence_passes,
@@ -134,7 +120,7 @@ def sweep(board, adapter, snapshot, records, board_path, verify_apply, max_scope
         eligible = set(signature)
         planning_started = time.monotonic()
         try:
-            best = generate_converged_plan(
+            best = plan_selected_copper(
                 snapshot.model, eligible,
                 min_gain=CONFIG.gloss.minimum_saved_length_mm)
             if not best.changed:
@@ -155,9 +141,6 @@ def sweep(board, adapter, snapshot, records, board_path, verify_apply, max_scope
             "seed": seed_key,
             "net": net_name,
             "eligible": len(eligible),
-            "terminals": len(find_track_terminal_targets(snapshot.model, eligible)),
-            "pad_terminals": len(find_pad_terminal_targets(
-                snapshot.model, eligible)),
             "changed": best is not None,
             "saved": round(best.saved_mm, 6) if best else 0.0,
             "remove": len(best.remove_keys) if best else 0,

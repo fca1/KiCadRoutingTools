@@ -23,43 +23,12 @@ def split_diagnostic_report(lines):
         summary = []
 
     prefixes = (
-        "Plugin version:", "KiCad version:", "Eligible net(s)",
-        "Selected objects:", "Eligible straight segments:",
-        "Optimization coordinates:")
-    context = [line for line in detail_lines
-               if line.startswith(prefixes)]
-
-    data = None
-    if json_lines and json_lines[0] != \
-            "No machine-readable result is available for this run.":
-        try:
-            data = json.loads("\n".join(json_lines))
-        except (TypeError, ValueError):
-            data = None
-    if data is not None:
-        saved = data.get("saved_mm", 0.0)
-        percent = data.get("saved_percent", 0.0)
-        segments_before = data.get("eligible_segments", 0)
-        segments_after = data.get("segments_after", segments_before)
-        summary.extend([
-            "GLOSS APPLIED",
-            "",
-            "Length saved: {:.6f} mm ({:.3f}%)".format(saved, percent),
-            "Copper length: {:.6f} -> {:.6f} mm".format(
-                data.get("before_mm", 0.0), data.get("after_mm", 0.0)),
-            "Segments: {} -> {} ({} saved)".format(
-                segments_before, segments_after,
-                data.get("segments_saved", segments_before - segments_after)),
-            "Non-octolinear segments corrected: {}".format(
-                data.get("angle_corrections", 0)),
-        ])
-    else:
-        result_lines = [line for line in detail_lines
-                        if line.startswith(("Result:", "Reason:",
-                                            "UNEXPECTED ERROR"))]
-        summary.extend(result_lines or ["No modification was applied."])
-    if context:
-        summary.extend([""] + context)
+        "Outcome:", "File:", "Path:", "Scope:", "Gain:",
+        "Gain available:", "Segments:", "Passes:", "DRC:",
+        "Primary reason:", "Total time:", "UNEXPECTED ERROR")
+    summary = [line for line in detail_lines if line.startswith(prefixes)]
+    if not summary:
+        summary = ["No modification was applied."]
     return summary, detail_lines, json_lines
 
 

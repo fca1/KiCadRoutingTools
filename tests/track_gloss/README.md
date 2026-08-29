@@ -1,74 +1,21 @@
-# Track Gloss validation
+# Track Gloss tests
 
-This directory owns all tests and real-board patterns for the standalone
-KiCad Track Gloss plugin.
+Fast API-neutral tests:
 
-```text
-track_gloss/
-├── unit/                 API-neutral and mocked-KiCad pytest tests
-├── patterns/             frozen KiCad board/project/rule inputs
-│   └── dispenser_labels/
-└── run_patterns.py       integration replay under KiCad's Python
-```
-
-Run the fast tests from the repository root:
-
-```text
+```powershell
 py -3.12 -m pytest tests/track_gloss/unit -q
 ```
 
-Run real-board validation without saving any PCB:
+Real-board acceptance uses the public CLI under KiCad 10's Python. The focused
+fixtures are `magic_keys`, `picofx_pump`, `muzy_zynq4`, `polykit_x_inputboard`,
+and the five interacting `nanovoltmeter_marge` nets documented in
+`docs/real-spirit.md`. Use one total budget and keep native DRC enabled for the
+final acceptance run, for example:
 
-```text
-D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py
+```powershell
+D:\kicad\bin\python.exe tools\score_track_gloss.py board.kicad_pro --time-budget 60
 ```
 
-The default real-board run evaluates the all-selected board to its shared
-fixed point once.
-
-The exhaustive generation of every connection scope and the corresponding
-fresh-board applications are also suspended by default. Enable that separate
-deep check only when changing the planner or KiCad writer:
-
-```text
-D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --full-sweep
-```
-
-Both optional checks can be combined when a complete deep validation is
-actually required.
-
-Artificial collinear subdivision invariance is another deliberately optional
-alpha/deep check. It splits every eligible real-board segment into halves and
-then thirds wherever the artificial cut is not a pad, via, or track-junction
-anchor. It converges all representations independently, removes artificial
-degree-two breakpoints, and requires the complete final copper geometry and
-saved length to be identical:
-
-```text
-D:\kicad\bin\python.exe tests\track_gloss\run_patterns.py --segment-subdivisions
-```
-
-This check is disabled during routine release validation because it performs
-two additional all-board fixed-point searches. The former seven-order replay
-has been removed from the test suite.
-
-Smoke-test the all-track read-only score CLI with the frozen board, project,
-and design rules:
-
-```text
-D:\kicad\bin\python.exe tools\score_track_gloss.py --project tests\track_gloss\patterns\dispenser_labels\dispenser_labels.kicad_pro tests\track_gloss\patterns\dispenser_labels\dispenser_labels.kicad_pcb
-```
-
-The geometric corpus must report 706 selected seeds, 590 eligible tracks, 116
-protected tuned tracks, 66.020888 mm of candidate copper saved, and 32 segments
-saved (237 removed and 205 added). A native rejection of the whole-board plan
-no longer implies `changed:false`: the CLI rebuilds and validates exact local
-connections, then reports the best approved subset reached within an optional
-`--time-budget`. The fixture must remain byte-for-byte unchanged.
-
-Boards tested manually should not be added automatically. When a board becomes
-a useful non-regression case, copy its `.kicad_pcb` and, when available, its
-matching `.kicad_pro` and `.kicad_dru` into a named directory under `patterns/`.
-Record SHA-256 fingerprints, keep Git line-ending conversion disabled for the
-fixture, load it only in memory, and add explicit expected results to the
-runner. Never overwrite a pattern during validation.
+The nanovoltmeter pass-order check selects `AB_CTRL`, `AB_RST`, `AB_RX`,
+`AB_TX`, and `BEEP`, verifies monotone complete incumbents, reruns the accepted
+board to a no-op/fixed point, and performs one final global DRC comparison.

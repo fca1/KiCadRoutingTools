@@ -1,117 +1,15 @@
-# Safety and native KiCad DRC
+# Safety and native DRC
 
-Track Gloss uses two complementary safety layers. Fast internal checks reject
-unsafe candidates during search. A native KiCad before/after DRC gate validates
-the final composed plan when the policy requires it.
+The engine receives KiCad 10's evaluated per-item clearance, copper layers,
+exact pad geometry, keepouts, Edge.Cuts, locks, and native protection. It checks
+every new segment against those API-neutral snapshots and verifies connectivity
+before native validation.
 
-## Internal validation
+When enabled, native DRC is called only for the final composed plan. A private
+baseline board and candidate board are checked with the same project and rule
+files; the plan is accepted only if no DRC category/fingerprint increases. The
+baseline half may execute concurrently with geometric planning and is cached,
+which reduces wall time without weakening the comparison.
 
-The API-neutral engine checks new candidate copper against nearby indexed
-geometry and then runs exact kernels. It covers foreign tracks, pads, vias,
-keepouts, board edges, explicit mask graphics, immutable terminal
-connectivity, net/layer/width preservation, and plan identity.
-
-Copper layers come from KiCad semantic layer APIs, not display names or string
-suffixes. Through-hole pads and through-vias therefore remain obstacles on all
-applicable copper layers even if internal layers have custom names.
-
-Every via padstack diameter and every evaluated via/pad clearance is captured
-separately for each copper layer. Pad checks use actual rotated circle,
-rectangle, oval, rounded-rectangle, and effective custom-pad copper. Edge checks use the chained Edge.Cuts outline,
-including arcs and internal holes, rather than only the board bounding box.
-
-These checks are intentionally conservative but cannot reproduce every KiCad
-design-rule interaction. They reduce the candidate set; they do not replace
-the native gate.
-
-## Native validation sequence
-
-For a plan requiring native validation, the adapter:
-
-1. creates private same-project baseline and candidate snapshots;
-2. applies the composed plan only to the candidate copy;
-3. refills zones on both copies through `kicad-cli`;
-4. runs KiCad DRC and parses the JSON reports;
-5. compares category counts and stable finding identities;
-6. accepts only a plan that introduces no prohibited regression;
-7. deletes all temporary files before returning.
-
-The current PCB is not saved or modified by this validation. Only an accepted
-plan is later applied to the live board as one Undo transaction.
-
-Most geometric DRC categories use normalized finding fingerprints. KiCad can
-describe the same ratsnest gap through different tiny items after independent
-zone refills, so `unconnected_items` is compared by count increase instead of
-unstable item identity.
-
-## Performance
-
-Candidate planning for one connection is often measured in tens of
-milliseconds. Starting helper processes, refilling zones, and running two
-full-board DRC evaluations can dominate the operation and take seconds. On
-Windows these processes are hidden so no console windows or taskbar entries
-appear.
-
-Baseline results may be reused only through an exact-content bounded cache
-whose key includes board, project, design rules, KiCad executable, and relevant
-validation inputs. An identical rejected candidate may also be cached. A
-timeout, crashed helper, unreadable report, or stale cache key must fail closed.
-
-The baseline and candidate preparation/DRC work is overlapped where safe. No
-`pcbnew` object is serialized into a worker process.
-
-## Fast path and session switch
-
-Every candidate is first checked as a clearance-inflated polyline. A track of
-width `w` and effective clearance `c` occupies an obstacle envelope of width
-`w + 2c`. Against another track, the engine uses the larger of both resolved
-clearances and adds both copper half-widths. Pads, vias, keepouts and board
-edges are tested with their corresponding Minkowski margins. Ordinary
-clearance is therefore part of path construction instead of being discovered
-afterward by DRC.
-
-KiCad 10 SWIG exposes evaluated per-item/layer clearance through
-`GetOwnClearance()` and netclass values, but no public two-object rule evaluator.
-Conditional `.kicad_dru` rules depending on a specific pair, zone refill
-connectivity, thermals, and other global categories remain reasons to keep
-native DRC enabled when required.
-
-A native DRC may be skipped automatically only for a provable containment case:
-the board has no zones and every added segment lies wholly inside copper being
-removed. Ordinary corner cutting, endpoint relocation, pad sliding, and T
-sliding do not meet this proof.
-
-The session setting is an explicit user safety/latency trade-off applying to
-both a single connection and a multi-net selection. When disabled, the
-internal checks remain active but the native before/after gate is skipped.
-The packaged default is enabled.
-
-## Candidate ladder and connection-local recovery
-
-For one selected connection, the canonical planner repeatedly pulls the whole
-existing path taut between its terminations. Octolinear chords remove obsolete
-support points and continuous contact moves slide remaining runs against
-inflated obstacles. Endpoint movement at pads and same-net T junctions belongs
-to that same contraction. The former movable/fixed endpoint matrix and local
-corridor replanning are not separate fallback algorithms anymore. Every plan
-passes the complete internal gate first.
-
-If a taut state is rejected while a geometrically compatible relaxed state is
-approved, three interpolated octolinear states are validated between them.
-This moves toward the DRC boundary in one validation wave instead of repeating
-minimum-saving translations. Only the unrestricted connection solver may
-certify `fixed_point`; a fallback optimum is automatically resumed or reported
-as partial when the 20-second operation budget expires.
-
-KiCad recreates the identity and reported position of an unconnected item when
-the touched tracks are rebuilt.  This category is therefore compared by its
-before/after count; stable geometric violation categories retain exact JSON
-comparison.  Diagnostics print both unconnected counts whenever relevant.
-
-For a selection spanning several local connections, the engine also rebuilds
-each connection through the same convergence path used when one segment is
-selected. Their best compatible composition is ranked against the global plan
-before DRC. If both leading candidates are rejected, local plans are validated
-in an anytime portfolio: two independent probes first, then a complete-batch
-candidate beside one incremental extension of the already safe base. Only the
-last native-DRC-approved base can be applied when the deadline is reached.
+No per-net, per-pass, or candidate-ladder DRC exists. Disabling native DRC
+retains exact internal checks but removes the final KiCad authority check.
